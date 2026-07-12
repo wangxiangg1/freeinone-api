@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deno-Free-All · API 聚合控制台</title>
+  <script>
+    (function () {
+      var saved = localStorage.getItem('dfa_theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      } else {
+        var sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', sysDark ? 'dark' : 'light');
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #FAF6F0; --bg-sunken: #F1EBE2; --surface: #FFFFFF; --surface-raised: #FFFFFF; --surface-hover: #FBF8F3;
+      --border: rgba(120, 85, 55, 0.12); --border-strong: rgba(120, 85, 55, 0.22);
+      --text: #2A1F18; --text-muted: #8A7565; --text-faint: #B6A493;
+      --accent: #C0552E; --accent-hover: #A8461F; --accent-soft: rgba(192, 85, 46, 0.10); --accent-glow: rgba(192, 85, 46, 0.18);
+      --amber: #B7791F; --amber-soft: rgba(183, 121, 31, 0.12);
+      --success: #5B7F3A; --success-soft: rgba(91, 127, 58, 0.12);
+      --danger: #B83A2B; --danger-soft: rgba(184, 58, 43, 0.10);
+      --shadow-sm: 0 1px 2px rgba(120, 85, 55, 0.05);
+      --shadow-card: 0 1px 3px rgba(120, 85, 55, 0.06), 0 6px 20px -8px rgba(120, 85, 55, 0.12);
+      --shadow-card-hover: 0 2px 6px rgba(120, 85, 55, 0.08), 0 12px 32px -8px rgba(120, 85, 55, 0.18);
+      --shadow-modal: 0 24px 60px -12px rgba(60, 40, 25, 0.30), 0 8px 24px -8px rgba(60, 40, 25, 0.15);
+      --radius-sm: 8px; --radius: 14px; --radius-lg: 20px;
+    }
+    html[data-theme="dark"] {
+      --bg: #1C1714; --bg-sunken: #15110E; --surface: #28211C; --surface-raised: #2F2722; --surface-hover: #352C26;
+      --border: rgba(232, 200, 170, 0.08); --border-strong: rgba(232, 200, 170, 0.16);
+      --text: #F2E9DF; --text-muted: #B09A87; --text-faint: #7A6857;
+      --accent: #E07B4F; --accent-hover: #EC8A5C; --accent-soft: rgba(224, 123, 79, 0.14); --accent-glow: rgba(224, 123, 79, 0.28);
+      --amber: #D9A23A; --amber-soft: rgba(217, 162, 58, 0.14);
+      --success: #94B86C; --success-soft: rgba(148, 184, 108, 0.14);
+      --danger: #E07060; --danger-soft: rgba(224, 112, 96, 0.14);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+      --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.4), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+      --shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.5), 0 14px 38px -8px rgba(0, 0, 0, 0.6);
+      --shadow-modal: 0 24px 60px -12px rgba(0, 0, 0, 0.7), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+    }
+    html[data-theme="light"] { color-scheme: light; }
+    html[data-theme="dark"] { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.65;
+    }
+    body {
+      background-image: radial-gradient(ellipse 80% 50% at 0% 0%, var(--accent-soft) 0%, transparent 60%), radial-gradient(ellipse 60% 50% at 100% 100%, var(--amber-soft) 0%, transparent 60%);
+      background-attachment: fixed;
+    }
+    code, .mono, input.mono { font-family: monospace; }
+    
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; padding: 0.55rem 1.1rem;
+      font-size: 0.875rem; font-weight: 500; line-height: 1; border-radius: var(--radius-sm); border: 1px solid transparent;
+      cursor: pointer; transition: all 0.18s ease; white-space: nowrap; background: transparent; color: var(--text);
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+    .btn-primary { background: var(--accent); color: #FFF; box-shadow: 0 1px 2px var(--accent-glow), 0 4px 12px -4px var(--accent-glow); }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 2px 4px var(--accent-glow), 0 8px 18px -4px var(--accent-glow); }
+    .btn-ghost { background: var(--surface); border-color: var(--border); color: var(--text-muted); }
+    .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); }
+    .btn-danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+    .btn-danger:hover:not(:disabled) { background: var(--danger); color: #FFF; }
+    .btn-sm { padding: 0.35rem 0.7rem; font-size: 0.8rem; }
+    
+    /* Forms */
+    .form-group { margin-bottom: 1.1rem; }
+    .form-group label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.4rem; }
+    .form-control {
+      width: 100%; padding: 0.65rem 0.9rem; font-size: 0.9rem; font-family: inherit;
+      background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text);
+      outline: none; transition: all 0.18s ease;
+    }
+    .form-control:focus { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .form-control::placeholder { color: var(--text-faint); }
+    
+    /* Auth */
+    .auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 2rem; }
+    .auth-card { width: 100%; max-width: 400px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 2.5rem; box-shadow: var(--shadow-modal); animation: cardRise 0.5s ease; }
+    .auth-title { font-size: 1.4rem; font-weight: 700; text-align: center; margin-bottom: 0.3rem; }
+    .auth-subtitle { font-size: 0.88rem; color: var(--text-muted); text-align: center; margin-bottom: 1.8rem; }
+    
+    /* Layout */
+    .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+    .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 1.5rem 1rem; display: flex; flex-direction: column; gap: 1.5rem; position: sticky; top: 0; height: 100vh; }
+    .brand { font-weight: 700; font-size: 1.05rem; padding: 0.4rem 0.5rem; }
+    .nav { display: flex; flex-direction: column; gap: 0.15rem; }
+    .nav-item { display: flex; align-items: center; gap: 0.7rem; padding: 0.6rem 0.8rem; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-muted); font-size: 0.9rem; font-weight: 500; transition: all 0.15s ease; border: none; background: transparent; width: 100%; text-align: left; }
+    .nav-item:hover { background: var(--surface-hover); color: var(--text); }
+    .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .sidebar-footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 1rem; display: flex; gap: 0.5rem; }
+    .sidebar-footer .btn { flex: 1; }
+    .theme-toggle { flex: 0 0 auto !important; width: 38px; padding: 0 !important; }
+    .theme-toggle svg { display: none; }
+    html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
+    html[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
+    
+    .main { padding: 2.5rem 3rem; max-width: 1100px; width: 100%; }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 1.8rem; }
+    .page-title { font-size: 1.6rem; font-weight: 700; }
+    .page-desc { font-size: 0.88rem; color: var(--text-muted); margin-top: 0.2rem; }
+    .page-actions { display: flex; gap: 0.5rem; }
+    .view { display: none; }
+    .view.active { display: block; animation: viewFade 0.3s ease-out; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
+    
+    /* Cards */
+    .channel-grid { display: grid; grid-template-columns: 1fr; gap: 0.9rem; }
+    .channel-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.1rem 1.3rem; box-shadow: var(--shadow-card); display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 1.1rem; transition: all 0.2s ease; }
+    .channel-card:hover { box-shadow: var(--shadow-card-hover); border-color: var(--border-strong); }
+    .channel-card.disabled { opacity: 0.62; }
+    .ch-status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px var(--success-soft); }
+    .ch-status-dot.off { background: var(--text-faint); box-shadow: 0 0 0 4px var(--bg-sunken); }
+    .ch-main { min-width: 0; }
+    .ch-name { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; font-size: 0.98rem; }
+    .ch-prefix-tag { padding: 0.1rem 0.45rem; font-size: 0.7rem; background: var(--amber-soft); color: var(--amber); border-radius: 5px; }
+    .ch-url { font-size: 0.82rem; color: var(--text-muted); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ch-meta { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.78rem; color: var(--text-muted); }
+    .ch-model-count { color: var(--accent); font-weight: 600; }
+    .latency-pill { font-family: monospace; font-weight: 600; font-size: 0.78rem; padding: 0.1rem 0.5rem; border-radius: 6px; background: var(--bg-sunken); color: var(--text-muted); }
+    .latency-pill.ok { background: var(--success-soft); color: var(--success); }
+    .latency-pill.bad { background: var(--danger-soft); color: var(--danger); }
+    .latency-pill.testing { background: var(--amber-soft); color: var(--amber); }
+    .ch-actions { display: flex; gap: 0.35rem; align-items: center; }
+    
+    .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; inset: 0; cursor: pointer; background: var(--border-strong); border-radius: 22px; transition: 0.2s; }
+    .slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #FFF; border-radius: 50%; transition: 0.2s; }
+    input:checked + .slider { background: var(--success); }
+    input:checked + .slider::before { transform: translateX(18px); }
+    
+    .key-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.85rem 1.1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); margin-bottom: 0.7rem; transition: all 0.18s ease; }
+    .key-row:hover { border-color: var(--border-strong); box-shadow: var(--shadow-card); }
+    .key-text { font-family: monospace; font-size: 0.88rem; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    
+    .empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); }
+    .empty-state p { font-size: 0.9rem; }
+    
+    /* Modals */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; animation: backdropFade 0.2s; }
+    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-modal); animation: modalRise 0.35s; }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1.4rem 1.6rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+    .modal-title { font-size: 1.15rem; font-weight: 700; }
+    .modal-close { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: none; background: transparent; color: var(--text-muted); cursor: pointer; }
+    .modal-close:hover { background: var(--surface-hover); color: var(--text); }
+    .modal-body { padding: 1.4rem 1.6rem; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 0.6rem; padding: 1rem 1.6rem; border-top: 1px solid var(--border); position: sticky; bottom: 0; background: var(--surface); }
+    
+    .input-with-action { position: relative; }
+    .input-with-action .form-control { padding-right: 2.5rem; }
+    .input-with-action .eye-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: transparent; color: var(--text-muted); cursor: pointer; padding: 5px; }
+    
+    .model-toolbar { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .models-box { max-height: 160px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem; background: var(--bg-sunken); }
+    .model-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; border-radius: 6px; }
+    .model-item:hover { background: var(--surface-hover); }
+    .preview-box { max-height: 90px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; color: var(--text-muted); background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.6rem 0.8rem; white-space: pre-wrap; word-break: break-all; }
+    
+    .status-hint { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .status-hint.warning { color: var(--amber); } /* Fixed CSS issue */
+    
+    /* Toast */
+    .toast { position: fixed; bottom: 28px; right: 28px; background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); padding: 0.85rem 1.3rem; border-radius: var(--radius); box-shadow: var(--shadow-modal); z-index: 1000; opacity: 0; transform: translateY(20px); transition: all 0.3s ease; display: flex; align-items: center; gap: 0.5rem; font-size: 0.88rem; max-width: 360px; pointer-events: none; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+    .toast.danger .toast-dot { background: var(--danger); }
+    .spin { display: inline-block; width: 11px; height: 11px; border: 1.5px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.3rem; }
+    
+    @keyframes cardRise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes modalRise { from { opacity: 0; transform: translateY(16px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    @keyframes viewFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes backdropFade { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    
+    @media (max-width: 860px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { position: sticky; top: 0; height: auto; flex-direction: row; align-items: center; padding: 0.8rem 1rem; z-index: 20; }
+      .nav { flex-direction: row; }
+      .nav-item span { display: none; }
+      .sidebar-footer { margin-left: auto; border-top: none; padding-top: 0; }
+      .main { padding: 1.5rem; }
+      .channel-card { grid-template-columns: auto 1fr; }
+      .channel-card .ch-actions { grid-column: 1 / -1; justify-content: flex-end; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="toast" class="toast"><span class="toast-dot"></span><span id="toastText">提示</span></div>
+
+  <div id="authSection" class="auth-wrap">
+    <div id="initView" class="auth-card" style="display: none;">
+      <div class="auth-title">初始化控制台</div>
+      <div class="auth-subtitle">首次使用，请设置管理员密码以锁定配置</div>
+      <form id="initForm">
+        <div class="form-group">
+          <label>管理员密码</label>
+          <input type="password" id="initPassword" class="form-control" required minlength="6">
+        </div>
+        <div class="form-group">
+          <label>确认密码</label>
+          <input type="password" id="initPasswordConfirm" class="form-control" required minlength="6">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">保存并继续</button>
+      </form>
+    </div>
+
+    <div id="migrateView" class="auth-card" style="display: none;">
+      <div class="auth-title">迁移 V1 配置</div>
+      <div class="auth-subtitle" id="migrationHint">检测到旧版配置</div>
+      <form id="migrateForm">
+        <div class="form-group">
+          <label>旧版面板密码</label>
+          <input type="password" id="legacyPassword" class="form-control" required>
+        </div>
+        <div class="form-group">
+          <label>新的面板密码</label>
+          <input type="password" id="migratePassword" class="form-control" required minlength="6">
+        </div>
+        <div class="form-group">
+          <label>确认新密码</label>
+          <input type="password" id="migratePasswordConfirm" class="form-control" required minlength="6">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">迁移并启用 V2</button>
+        <button type="button" id="btnSkipMigration" class="btn btn-ghost" style="width: 100%; margin-top: 0.7rem;">跳过，重新初始化</button>
+      </form>
+    </div>
+
+    <div id="loginView" class="auth-card" style="display: none;">
+      <div class="auth-title">Deno-Free-All V2</div>
+      <div class="auth-subtitle">输入管理员密码以进入控制台</div>
+      <form id="loginForm">
+        <div class="form-group">
+          <label>访问密码</label>
+          <input type="password" id="loginPassword" class="form-control" required>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">登录</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="dashboardSection" class="app" style="display: none;">
+    <aside class="sidebar">
+      <div class="brand">Deno-Free-All</div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="channels"><span>渠道管理</span></button>
+        <button class="nav-item" data-view="keys"><span>访问密钥</span></button>
+        <button class="nav-item" data-view="settings"><span>安全设置</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="btn btn-ghost theme-toggle" id="btnThemeToggle"><svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg><svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+        <button class="btn btn-ghost" id="btnLogout">退出</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section id="channelsView" class="view active">
+        <div class="page-head">
+          <div><h2 class="page-title">渠道管理</h2></div>
+          <div class="page-actions">
+            <button class="btn btn-ghost" id="btnTestAll">一键测速</button>
+            <button class="btn btn-primary" id="btnAddChannel">添加渠道</button>
+          </div>
+        </div>
+        <div id="channelsContainer" class="channel-grid"></div>
+      </section>
+
+      <section id="keysView" class="view">
+        <div class="page-head">
+          <div><h2 class="page-title">访问密钥</h2></div>
+          <div class="page-actions">
+            <button class="btn btn-primary" id="btnAddKey">生成密钥</button>
+          </div>
+        </div>
+        <div id="keysContainer"></div>
+      </section>
+
+      <section id="settingsView" class="view">
+        <div class="page-head">
+          <div><h2 class="page-title">安全设置</h2></div>
+        </div>
+        <div class="card" style="max-width: 480px; padding: 1.6rem;">
+          <form id="changePasswordForm">
+            <div class="form-group">
+              <label>当前密码</label>
+              <input type="password" id="oldPassword" class="form-control" required>
+            </div>
+            <div class="form-group">
+              <label>新密码</label>
+              <input type="password" id="newPassword" class="form-control" required minlength="6">
+            </div>
+            <div class="form-group">
+              <label>确认新密码</label>
+              <input type="password" id="confirmNewPassword" class="form-control" required minlength="6">
+            </div>
+            <button type="submit" class="btn btn-primary">更新密码</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="channelModal" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title" id="modalTitle">添加渠道</span>
+        <button class="modal-close" id="btnCloseChannelModal">X</button>
+      </div>
+      <form id="channelForm">
+        <div class="modal-body">
+          <input type="hidden" id="channelId">
+          <div class="form-group"><label>渠道名称</label><input type="text" id="cName" class="form-control" required></div>
+          <div class="form-group"><label>Base URL</label><input type="url" id="cBaseUrl" class="form-control" required></div>
+          <div class="form-group">
+            <label>API Key</label>
+            <div class="input-with-action">
+              <input type="text" id="cApiKey" class="form-control mono" required style="-webkit-text-security: disc;" autocomplete="off">
+              <button type="button" id="toggleApiKeyVisibleBtn" class="eye-btn" title="显示/隐藏 API Key" aria-label="显示或隐藏 API Key">👁</button>
+            </div>
+          </div>
+          <div class="form-group"><label>权重</label><input type="number" id="cWeight" class="form-control" required min="1" max="100" value="10"></div>
+          <div class="form-group"><label>模型前缀</label><input type="text" id="cModelPrefix" class="form-control"></div>
+          <div class="form-group">
+            <button type="button" id="btnFetchModels" class="btn btn-ghost" style="width: 100%;">拉取上游模型列表</button>
+            <div id="modelsLoadingText" class="status-hint warning" style="display: none;"><span class="spin"></span>处理中…</div>
+            <div id="modelsStatusText" class="status-hint">未拉取（默认透传）</div>
+          </div>
+          <div id="filterModeGroup" class="form-group" style="display: none;">
+            <label>过滤模式</label>
+            <select id="cFilterMode" class="form-control">
+              <option value="none">全部透传</option>
+              <option value="keyword">关键字保留</option>
+              <option value="manual">手动勾选</option>
+            </select>
+          </div>
+          <div id="filterKeywordsGroup" class="form-group" style="display: none;">
+            <label>关键字 (逗号分隔)</label>
+            <input type="text" id="cFilterKeywords" class="form-control">
+          </div>
+          <div id="filterManualGroup" class="form-group" style="display: none;">
+            <label>勾选启用的模型</label>
+            <div class="model-toolbar">
+              <input type="text" id="modelSearchInput" class="form-control" placeholder="搜索…">
+              <button type="button" class="btn btn-ghost btn-sm" id="btnSelectAll">全选</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btnClearAll">清空</button>
+            </div>
+            <div id="modelsCheckboxList" class="models-box"></div>
+          </div>
+          <div class="form-group">
+            <label>预览 (<span id="previewCount">0</span>)</label>
+            <div id="modelsPreviewArea" class="preview-box">--</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="btnCancelChannelModal">取消</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="keyModal" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header"><span class="modal-title">生成新密钥</span><button class="modal-close" id="btnCloseKeyModal">X</button></div>
+      <form id="keyForm">
+        <div class="modal-body">
+          <div class="form-group"><label>API 密钥值</label><input type="text" id="customKeyInput" class="form-control mono" required></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="btnCancelKeyModal">取消</button>
+          <button type="submit" class="btn btn-primary">确认添加</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+<script>
+let adminToken = localStorage.getItem('cf_free_all_token_v2') || '';
+let globalConfig = null;
+let currentFetchedModels = [];
+
+function showToast(msg, type = 'success') {
+  const toast = document.getElementById('toast');
+  document.getElementById('toastText').innerText = msg;
+  toast.className = `toast show ${type === 'danger' ? 'danger' : ''}`;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/[&<>'"]/g, tag => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  }[tag]));
+}
+
+async function apiCall(action, payload = {}) {
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminToken}` },
+    body: JSON.stringify({ action, ...payload })
+  });
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) {
+    const err = new Error(data?.message || data?.error?.message || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data || {};
+}
+
+async function saveGlobalConfig() {
+  const result = await apiCall('update', { config: globalConfig });
+  if (typeof result.configVersion === 'number') {
+    globalConfig.configVersion = result.configVersion;
+  }
+  return result;
+}
+
+function handleSaveError(err, fallback = '保存失败') {
+  showToast(err?.message || fallback, 'danger');
+  checkStatus();
+}
+
+async function checkStatus() {
+  try {
+    const res = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${adminToken}` } });
+    if (res.status === 401) { showAuth('login'); }
+    else if (res.status === 412) {
+      const data = await res.json().catch(() => ({}));
+      showAuth(data.migrationAvailable ? 'migrate' : 'init', data);
+    }
+    else if (res.ok) {
+      globalConfig = await res.json();
+      document.getElementById('authSection').style.display = 'none';
+      document.getElementById('dashboardSection').style.display = 'grid';
+      renderChannels();
+      renderKeys();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(data.message || `HTTP ${res.status}`, 'danger');
+    }
+  } catch (err) { showToast('无法连接到后端', 'danger'); }
+}
+
+function showAuth(type, meta = {}) {
+  document.getElementById('authSection').style.display = 'flex';
+  document.getElementById('dashboardSection').style.display = 'none';
+  document.getElementById('initView').style.display = type === 'init' ? 'block' : 'none';
+  document.getElementById('migrateView').style.display = type === 'migrate' ? 'block' : 'none';
+  document.getElementById('loginView').style.display = type === 'login' ? 'block' : 'none';
+  if (type === 'migrate') {
+    document.getElementById('migrationHint').innerText = `检测到旧版配置：${meta.legacyChannelCount || 0} 个渠道，${meta.legacyAccessKeyCount || 0} 个访问密钥`;
+  }
+}
+
+// Auth Handlers
+document.getElementById('initForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const pwd = document.getElementById('initPassword').value;
+  if (pwd !== document.getElementById('initPasswordConfirm').value) return showToast('密码不一致', 'danger');
+  try {
+    await apiCall('init', { password: pwd });
+    showToast('初始化成功'); checkStatus();
+  } catch (err) { showToast(err?.message || '初始化失败', 'danger'); }
+};
+
+document.getElementById('migrateForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const oldPassword = document.getElementById('legacyPassword').value;
+  const newPassword = document.getElementById('migratePassword').value;
+  if (newPassword !== document.getElementById('migratePasswordConfirm').value) return showToast('新密码不一致', 'danger');
+  try {
+    const result = await apiCall('migrate_v1', { oldPassword, newPassword });
+    adminToken = '';
+    localStorage.removeItem('cf_free_all_token_v2');
+    document.getElementById('migrateForm').reset();
+    showToast(`迁移完成：${result.channelCount || 0} 个渠道，${result.accessKeyCount || 0} 个访问密钥`);
+    showAuth('login');
+  } catch (err) { showToast(err?.message || '迁移失败', 'danger'); }
+};
+
+document.getElementById('btnSkipMigration').onclick = () => showAuth('init');
+
+document.getElementById('loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', password: document.getElementById('loginPassword').value }) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const { token } = data;
+      adminToken = token; localStorage.setItem('cf_free_all_token_v2', token);
+      showToast('登录成功'); checkStatus();
+    } else showToast(data.message || '密码错误', 'danger');
+  } catch (err) { showToast('登录出错', 'danger'); }
+};
+
+document.getElementById('btnLogout').onclick = () => { adminToken = ''; localStorage.removeItem('cf_free_all_token_v2'); checkStatus(); };
+
+// Nav
+document.querySelectorAll('.nav-item').forEach(el => el.onclick = () => {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById(el.dataset.view + 'View').classList.add('active');
+});
+
+// Render
+function renderChannels() {
+  const c = document.getElementById('channelsContainer');
+  if (!globalConfig.channels?.length) { c.innerHTML = '<div class="empty-state"><p>暂无渠道</p></div>'; return; }
+  c.innerHTML = globalConfig.channels.map(ch => `
+    <div class="channel-card ${ch.enabled?'':'disabled'}">
+      <div class="ch-status-dot ${ch.enabled?'':'off'}"></div>
+      <div class="ch-main">
+        <div class="ch-name">${escapeHtml(ch.name)} ${ch.modelPrefix ? `<span class="ch-prefix-tag">${escapeHtml(ch.modelPrefix)}</span>` : ''}</div>
+        <div class="ch-url">${escapeHtml(ch.baseUrl)}</div>
+        <div class="ch-meta"><span>权重 ${ch.weight}</span><span>${ch.models?.length||0} 模型</span><span id="latency-${escapeHtml(ch.id)}" class="latency-pill">--</span></div>
+      </div>
+      <div class="ch-actions">
+        <label class="switch"><input type="checkbox" data-action="toggle" data-id="${escapeHtml(ch.id)}" ${ch.enabled?'checked':''}><span class="slider"></span></label>
+        <button class="btn btn-ghost btn-sm" data-action="test" data-id="${escapeHtml(ch.id)}">测速</button>
+        <button class="btn btn-ghost btn-sm" data-action="copy" data-id="${escapeHtml(ch.id)}">复制</button>
+        <button class="btn btn-ghost btn-sm" data-action="edit" data-id="${escapeHtml(ch.id)}">编辑</button>
+        <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(ch.id)}">删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+document.getElementById('channelsContainer').onclick = async (e) => {
+  const btn = e.target.closest('button');
+  const checkbox = e.target.closest('input[type="checkbox"]');
+  const action = btn?.dataset.action || checkbox?.dataset.action;
+  const id = btn?.dataset.id || checkbox?.dataset.id;
+  if (!action || !id) return;
+  
+  if (action === 'toggle') {
+    const ch = globalConfig.channels.find(c => c.id === id);
+    if (ch) {
+      ch.enabled = checkbox.checked;
+      try {
+        await saveGlobalConfig();
+        showToast(ch.enabled?'已启用':'已禁用');
+      } catch (err) { handleSaveError(err); }
+    }
+  } else if (action === 'delete') {
+    if (confirm('确认删除？')) {
+      globalConfig.channels = globalConfig.channels.filter(c => c.id !== id);
+      try {
+        await saveGlobalConfig();
+        renderChannels();
+      } catch (err) { handleSaveError(err); }
+    }
+  } else if (action === 'edit') {
+    openChannelModal(id);
+  } else if (action === 'test') {
+    testChannel(id);
+  } else if (action === 'copy') {
+    const ch = globalConfig.channels.find(c => c.id === id);
+    if (ch) {
+      globalConfig.channels.push({...ch, id: 'ch_'+Date.now(), name: ch.name+'-Copy'});
+      try {
+        await saveGlobalConfig();
+        renderChannels();
+      } catch (err) { handleSaveError(err); }
+    }
+  }
+};
+
+function renderKeys() {
+  const c = document.getElementById('keysContainer');
+  if (!globalConfig.accessKeys?.length) { c.innerHTML = '<div class="empty-state"><p>暂无密钥</p></div>'; return; }
+  c.innerHTML = globalConfig.accessKeys.map((k, i) => `
+    <div class="key-row">
+      <div class="key-text">${escapeHtml(k)}</div>
+      <div>
+        <button class="btn btn-ghost btn-sm" data-action="copy" data-key="${escapeHtml(k)}">复制</button>
+        <button class="btn btn-danger btn-sm" data-action="delete" data-idx="${i}">删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+document.getElementById('keysContainer').onclick = async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.action === 'delete') {
+    globalConfig.accessKeys.splice(btn.dataset.idx, 1);
+    try {
+      await saveGlobalConfig();
+      renderKeys();
+    } catch (err) { handleSaveError(err); }
+  } else if (btn.dataset.action === 'copy') {
+    try { await navigator.clipboard.writeText(btn.dataset.key); showToast('已复制到剪贴板'); }
+    catch { showToast('剪贴板复制失败，请手动选取复制', 'danger'); }
+  }
+};
+
+// Channel Modal
+function openChannelModal(id = null) {
+  document.getElementById('channelForm').reset();
+  currentFetchedModels = []; updatePreview();
+  document.getElementById('channelId').value = id || '';
+  if (id) {
+    const ch = globalConfig.channels.find(c => c.id === id);
+    if (!ch) return showToast('渠道不存在', 'danger');
+    document.getElementById('cName').value = ch.name;
+    document.getElementById('cBaseUrl').value = ch.baseUrl;
+    document.getElementById('cApiKey').value = ch.apiKey; // Plaintext visible to admin
+    document.getElementById('cWeight').value = ch.weight;
+    document.getElementById('cModelPrefix').value = ch.modelPrefix || '';
+    document.getElementById('cFilterMode').value = ch.filterMode || 'none';
+    document.getElementById('cFilterKeywords').value = ch.filterKeywords || '';
+    currentFetchedModels = ch.fetchedModels || [];
+    if (currentFetchedModels.length) {
+      document.getElementById('filterModeGroup').style.display = 'block';
+      renderCheckboxes(currentFetchedModels, ch.selectedModels || []);
+    }
+  }
+  document.getElementById('channelModal').style.display = 'flex';
+  syncFilterUI();
+}
+
+['btnCloseChannelModal', 'btnCancelChannelModal'].forEach(id => document.getElementById(id).onclick = (e) => { e.preventDefault(); document.getElementById('channelModal').style.display = 'none'; });
+
+document.getElementById('cFilterMode').onchange = syncFilterUI;
+document.getElementById('cModelPrefix').oninput = updatePreview;
+document.getElementById('cFilterKeywords').oninput = updatePreview;
+
+function syncFilterUI() {
+  const m = document.getElementById('cFilterMode').value;
+  document.getElementById('filterKeywordsGroup').style.display = m === 'keyword' ? 'block' : 'none';
+  document.getElementById('filterManualGroup').style.display = m === 'manual' ? 'block' : 'none';
+  updatePreview();
+}
+
+function renderCheckboxes(models, selected) {
+  document.getElementById('modelsCheckboxList').innerHTML = models.map(m => `
+    <label class="model-item"><input type="checkbox" value="${escapeHtml(m)}" ${selected.includes(m)?'checked':''}><span>${escapeHtml(m)}</span></label>
+  `).join('');
+  document.querySelectorAll('.model-item input').forEach(el => el.onchange = updatePreview);
+}
+
+function updatePreview() {
+  const prefix = document.getElementById('cModelPrefix').value.trim().replace(/\/+$/, '');
+  const mode = document.getElementById('cFilterMode').value;
+  let o = currentFetchedModels;
+  if (mode === 'keyword') {
+    const kw = document.getElementById('cFilterKeywords').value.toLowerCase().split(',').map(s=>s.trim()).filter(s=>s);
+    if (kw.length) o = o.filter(m => kw.some(k => m.toLowerCase().includes(k)));
+  } else if (mode === 'manual') {
+    o = Array.from(document.querySelectorAll('.model-item input:checked')).map(el => el.value);
+  }
+  const f = o.map(m => prefix ? `${prefix}/${m}` : m);
+  document.getElementById('modelsPreviewArea').innerText = f.length ? f.join('\n') : '--';
+  document.getElementById('previewCount').innerText = f.length;
+}
+
+document.getElementById('btnFetchModels').onclick = async () => {
+  const baseUrl = document.getElementById('cBaseUrl').value;
+  const apiKey = document.getElementById('cApiKey').value;
+  if(!baseUrl||!apiKey) return showToast('需URL与Key','danger');
+  document.getElementById('modelsLoadingText').style.display='flex';
+  try {
+    const res = await apiCall('fetch_upstream_models', { baseUrl, apiKey });
+    if(res.status==='ok') {
+      currentFetchedModels = res.models || [];
+      document.getElementById('filterModeGroup').style.display='block';
+      renderCheckboxes(currentFetchedModels, currentFetchedModels); syncFilterUI(); showToast('获取成功');
+    } else showToast(res.message, 'danger');
+  } catch(e) { showToast(e?.message || '失败','danger'); }
+  document.getElementById('modelsLoadingText').style.display='none';
+};
+
+document.getElementById('toggleApiKeyVisibleBtn').onclick = () => {
+  const inp = document.getElementById('cApiKey');
+  inp.style.webkitTextSecurity = inp.style.webkitTextSecurity === 'none' ? 'disc' : 'none';
+};
+
+document.getElementById('channelForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const id = document.getElementById('channelId').value || 'ch_' + Date.now();
+  const name = document.getElementById('cName').value;
+  const baseUrl = document.getElementById('cBaseUrl').value;
+  const apiKey = document.getElementById('cApiKey').value; // plaintext save
+  let weight = parseInt(document.getElementById('cWeight').value);
+  if (isNaN(weight)) weight = 10;
+  const modelPrefix = document.getElementById('cModelPrefix').value;
+  const filterMode = document.getElementById('cFilterMode').value;
+  const filterKeywords = document.getElementById('cFilterKeywords').value;
+  const selectedModels = Array.from(document.querySelectorAll('.model-item input:checked')).map(cb=>cb.value);
+
+  const prefix = modelPrefix.replace(/\/+$/, '');
+  let orig = currentFetchedModels;
+  if(filterMode==='keyword') {
+    const kw = filterKeywords.split(',').map(s=>s.trim().toLowerCase()).filter(s=>s);
+    if(kw.length) orig = orig.filter(m => kw.some(k=>m.toLowerCase().includes(k)));
+  } else if (filterMode==='manual') orig = selectedModels;
+  const models = orig.map(m => prefix ? `${prefix}/${m}` : m);
+
+  const chData = { id, name, baseUrl, apiKey, weight, modelPrefix, filterMode, filterKeywords, selectedModels, fetchedModels: currentFetchedModels, models, enabled: true };
+  
+  const idx = globalConfig.channels.findIndex(c => c.id === id);
+  if (idx > -1) { chData.enabled = globalConfig.channels[idx].enabled; globalConfig.channels[idx] = chData; }
+  else globalConfig.channels.push(chData);
+
+  try {
+    await saveGlobalConfig();
+    document.getElementById('channelModal').style.display = 'none';
+    renderChannels(); showToast('已保存');
+  } catch (err) { handleSaveError(err); }
+};
+
+async function testChannel(id) {
+  const el = document.getElementById(`latency-${id}`);
+  if (!el) return;
+  el.className = 'latency-pill testing'; el.innerText = '测速…';
+  try {
+    const st = Date.now();
+    const r = await apiCall('ping', { channelId: id });
+    if (r.status === 'ok') { el.className = 'latency-pill ok'; el.innerText = (Date.now()-st)+'ms'; }
+    else { el.className = 'latency-pill bad'; el.innerText = '错误'; }
+  } catch(e) { el.className = 'latency-pill bad'; el.innerText = '离线'; }
+}
+document.getElementById('btnTestAll').onclick = () => { globalConfig.channels.forEach(c => { if(c.enabled) testChannel(c.id); }); };
+
+// Keys Modal
+document.getElementById('btnAddKey').onclick = () => { document.getElementById('customKeyInput').value = 'sk-' + crypto.randomUUID().replace(/-/g,''); document.getElementById('keyModal').style.display='flex'; };
+['btnCloseKeyModal','btnCancelKeyModal'].forEach(id => document.getElementById(id).onclick=(e)=>{e.preventDefault();document.getElementById('keyModal').style.display='none';});
+document.getElementById('keyForm').onsubmit = async (e) => {
+  e.preventDefault();
+  globalConfig.accessKeys.push(document.getElementById('customKeyInput').value);
+  try {
+    await saveGlobalConfig();
+    renderKeys();
+    document.getElementById('keyModal').style.display='none';
+  } catch (err) { handleSaveError(err); }
+};
+
+// Settings
+document.getElementById('changePasswordForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const oldPassword = document.getElementById('oldPassword').value;
+  const newPassword = document.getElementById('newPassword').value;
+  if(newPassword !== document.getElementById('confirmNewPassword').value) return showToast('新密码不一致','danger');
+  try {
+    await apiCall('changePassword', { oldPassword, newPassword });
+    showToast('修改成功，请重新登录'); document.getElementById('changePasswordForm').reset();
+    setTimeout(() => { document.getElementById('btnLogout').click(); }, 1000);
+  } catch(e) { showToast(e?.message || '旧密码错误','danger'); }
+};
+
+document.getElementById('btnThemeToggle').onclick = () => {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const nt = isDark ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', nt);
+  localStorage.setItem('dfa_theme', nt);
+};
+
+document.getElementById('modelSearchInput').oninput = (e) => {
+  const q = e.target.value.toLowerCase();
+  document.querySelectorAll('.model-item').forEach(el => el.style.display = el.innerText.toLowerCase().includes(q) ? 'flex' : 'none');
+};
+document.getElementById('btnSelectAll').onclick = () => { document.querySelectorAll('.model-item input').forEach(el => { if(el.parentElement.style.display!=='none') el.checked=true; }); updatePreview(); };
+document.getElementById('btnClearAll').onclick = () => { document.querySelectorAll('.model-item input').forEach(el => { if(el.parentElement.style.display!=='none') el.checked=false; }); updatePreview(); };
+
+checkStatus();
+</script>
+</body>
+</html>
