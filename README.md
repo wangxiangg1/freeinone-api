@@ -1,271 +1,243 @@
-# Deno-Free-All
+# Deno-Free-All / FreeInOne API
 
-一个部署在 **Deno Deploy** 上的轻量级 OpenAI 兼容 API 网关。支持配置多个上游渠道、模型前缀、模型过滤、无状态加权分流及故障切换，并提供内置 Web 管理面板。
+部署在 **Deno Deploy** 上的轻量级多协议 AI API 网关，提供 OpenAI 兼容代理、Gemini 原生 `v1beta` 透传、多渠道/多 Key 无状态分流、故障切换和内置 Web 管理面板。
 
-> 本项目不会提供任何上游模型或 API Key。使用者需要自行准备合法的 OpenAI 兼容上游服务及密钥。
+> 本项目不提供任何上游模型或 API Key。请自行准备合法的上游服务与密钥，并遵守相应服务条款。
 
-## 功能特性
+## 功能
 
-- OpenAI 兼容的 `/v1/*` 请求代理
-- 多上游渠道管理
-- 每个渠道独立配置 Base URL、API Key 和权重
-- 无状态加权随机分流，适合 Deno Deploy 多实例和冷启动环境
-- 上游故障时自动尝试其他可用渠道
-- 模型前缀与原始模型名自动转换
-- 支持全部透传、关键词过滤和手动选择模型
-- 聚合所有启用渠道的 `/v1/models`
-- 独立的网关访问密钥
-- Web 管理面板与管理员会话
-- Deno KV 配置持久化
-- 旧版 `CONFIG` 配置迁移到 `CONFIG_V2`
+- OpenAI 兼容 `/v1/*` 代理
+- Gemini 原生 `/v1beta/*` 请求、响应和 SSE 流透传
+- 显式区分 OpenAI / Gemini 渠道，避免跨协议误路由
+- 一个母渠道配置多个上游 Key
+- 每个 Key 作为独立运行时子渠道，共享 Base URL、模型、前缀和权重
+- 无状态加权随机分流，不为每个代理请求写入 Deno KV
+- 网络异常及 `401、403、408、425、429、5xx` 自动切换其他 Key/渠道
+- 模型前缀、关键词过滤和手动模型选择
+- OpenAI 与 Gemini 各自的聚合模型列表
+- 独立网关访问密钥、管理员会话和 Deno KV 配置持久化
 - 匿名路由诊断响应头
+- 旧单 Key 渠道自动兼容升级
 
-## 工作方式
+## 架构
 
 ```text
-OpenAI 客户端 / SillyTavern / 其他兼容客户端
-                       │
-                       │ 网关访问密钥
-                       ▼
-                Deno-Free-All
-                       │
-             模型匹配 + 权重选择
-                 ┌─────┴─────┐
-                 ▼           ▼
-              渠道 A       渠道 B
-              API Key A    API Key B
+OpenAI 客户端 ── /v1/* ───────┐
+                               │ 网关访问密钥
+Gemini 客户端 ─ /v1beta/* ────┤
+                               ▼
+                         FreeInOne API
+                               │
+                   协议隔离 + 模型匹配
+                               │
+                    无状态加权选择子 Key
+                    ┌──────────┴──────────┐
+                    ▼                     ▼
+               母渠道 A / Key 1      母渠道 A / Key 2
 ```
 
-### 两类 Key 的区别
-
-请注意，项目中有两类不同用途的密钥：
+## 两类密钥
 
 | 类型 | 配置位置 | 用途 |
 | --- | --- | --- |
-| 网关访问密钥 | 管理面板 → 访问密钥 | 客户端调用本项目时用于鉴权 |
-| 上游 API Key | 管理面板 → 渠道管理 | 本项目转发请求时用于访问上游 |
+| 网关访问密钥 | 管理面板 → 访问密钥 | 客户端访问本项目时鉴权 |
+| 上游 API Key | 管理面板 → 渠道管理 | 本项目访问 OpenAI/Gemini 上游 |
 
-“访问密钥”页面中的多个 Key 只是允许多个客户端访问网关，**不会作为上游 Key 池轮转**。
+“访问密钥”不会作为上游 Key 轮转。需要轮转多个上游 Key 时，在同一个母渠道的 **API Keys** 文本框中一次粘贴多个 Key。
 
-如果同一个提供商有多个上游 API Key，请为每个 Key 创建一个渠道，并保持它们的 Base URL、模型前缀和模型配置一致。
+## 母渠道与多 Key
 
-## 路由策略
+API Keys 支持：
 
-### 无状态加权分流
+```text
+key-one
+key-two
+key-three
+```
 
-项目使用无状态加权随机选择，不依赖进程内计数器，也不会为每次请求写入 Deno KV，因此适合 Deno Deploy 的无状态、多实例运行方式。
+也支持逗号、分号或 JSON 数组：
 
-例如：
+```json
+["key-one", "key-two", "key-three"]
+```
 
-| 渠道 | 权重 | 长期流量比例 |
-| --- | ---: | ---: |
-| 渠道 A | 10 | 约 50% |
-| 渠道 B | 10 | 约 50% |
+保存后：
 
-权重表示长期概率，并不保证每两次请求严格交替。
+- 面板只显示一个母渠道；
+- 展开“子渠道”可查看匿名 Key 序号和末 4 位；
+- 每个 Key 可单独启停、测速和删除；
+- 每个启用 Key 继承母渠道完整权重；
+- 增加 Key 会增加该母渠道的总候选权重和可用容量。
 
-### 故障切换
+例如两个 Key 均继承权重 10，长期流量大约为 50:50，但不会严格交替。
 
-当选中的上游出现网络异常，或返回以下状态码时，网关会尝试其他符合该模型的渠道：
+## 协议支持
+
+### OpenAI
+
+支持并透传 `/v1/*`，其中 `/v1/models` 返回所有启用 OpenAI 母渠道的聚合模型列表。
+
+客户端配置：
+
+```text
+Base URL: https://你的域名/v1
+API Key:  管理面板生成的网关访问密钥
+```
+
+适用于 OpenAI SDK、SillyTavern 及其他 OpenAI 兼容客户端。
+
+### Gemini 原生
+
+支持 Gemini 原生 `/v1beta/*`，不进行 OpenAI `messages/choices` 与 Gemini `contents/candidates` 之间的格式转换。
+
+Gemini 客户端可通过以下任意方式提交网关访问密钥：
+
+```http
+x-goog-api-key: 网关访问密钥
+```
+
+```text
+?key=网关访问密钥
+```
+
+```http
+Authorization: Bearer 网关访问密钥
+```
+
+网关验证后会删除客户端凭证，并仅向上游注入所选子渠道的 `x-goog-api-key`。
+
+示例：
+
+```bash
+curl "https://你的域名/v1beta/models/gm/gemini-2.5-pro:generateContent" \
+  -H "x-goog-api-key: 你的网关访问密钥" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role":"user","parts":[{"text":"Hello"}]}]
+  }'
+```
+
+流式接口保持 Gemini 原生格式：
+
+```text
+/v1beta/models/{model}:streamGenerateContent?alt=sse
+```
+
+> **有状态资源提示：** Files、Caches 等 `/v1beta/*` 资源同样可以透传，但多 Key 无状态分流无法保存资源与 Key 的亲和关系。只有这些 Key 属于同一 Google 项目且资源互相可见时，跨请求访问才可靠。
+
+## 模型前缀
+
+假设 Gemini 母渠道设置：
+
+```text
+前缀：gm
+原始模型：gemini-2.5-pro
+```
+
+客户端调用：
+
+```text
+/v1beta/models/gm/gemini-2.5-pro:generateContent
+```
+
+上游实际收到：
+
+```text
+/v1beta/models/gemini-2.5-pro:generateContent
+```
+
+OpenAI 请求体中的 `model` 字段使用相同的前缀移除逻辑。
+
+## 故障切换
+
+出现网络异常或以下状态码时，会剔除当前子 Key 并尝试其他候选：
 
 ```text
 401、403、408、425、429、5xx
 ```
 
-每个候选渠道最多尝试一次，并设置最多 5 次尝试的安全上限。正常请求只会调用一个上游；只有前一个渠道失败时才会产生后续尝试。
-
-> 对于已经返回 HTTP 200、随后在 SSE 流中发生的错误，网关无法安全地切换到其他渠道。
+- 每个运行时子渠道最多尝试一次；
+- 单个客户端请求最多尝试 5 个候选；
+- 正常响应只会产生一次上游请求；
+- HTTP 200 返回后发生的 SSE 中途错误无法再切换渠道。
 
 ## 部署到 Deno Deploy
 
-### 1. 上传到 GitHub
-
-仓库至少需要包含：
-
-```text
-.
-├── main.ts
-├── admin.html
-└── README.md
-```
-
-### 2. 创建 Deno Deploy 项目
-
-1. 登录 [Deno Deploy](https://dash.deno.com/)。
-2. 创建新项目并关联 GitHub 仓库。
-3. 将生产分支设置为你的 GitHub 默认分支。
+1. Fork 或克隆本仓库。
+2. 登录 [Deno Deploy](https://dash.deno.com/)。
+3. 创建项目并关联 GitHub 仓库。
 4. 将入口文件设置为 `main.ts`。
-5. 完成部署。
+5. 确保项目可以使用 Deno KV，然后部署。
+6. 访问 `https://你的域名/admin` 完成首次初始化。
 
-应用通过 `Deno.openKv()` 使用 Deno KV 保存配置。请确保部署环境支持并已启用 KV。
-
-### 3. 初始化管理面板
-
-部署完成后访问：
+仓库主要文件：
 
 ```text
-https://你的域名/admin
+main.ts          # Hono 后端、鉴权、路由和代理
+admin.html       # 内置管理面板
+tests/smoke.mjs  # 配置兼容、Key 解析和路由静态回归测试
 ```
-
-首次打开时：
-
-1. 设置管理员密码，至少 6 位。
-2. 添加一个或多个上游渠道。
-3. 拉取上游模型列表，并根据需要设置过滤模式。
-4. 在“访问密钥”页面生成客户端调用网关所需的密钥。
 
 ## 本地运行
 
-需要安装 [Deno](https://deno.com/)。
+需要安装 Deno：
 
 ```bash
 deno run --allow-net --allow-read --unstable-kv main.ts
 ```
 
-默认访问地址：
+默认管理地址：
 
 ```text
 http://localhost:8000/admin
 ```
 
-不同 Deno 版本对 KV 的命令行参数可能不同。如果当前版本已经稳定支持 KV，可以移除 `--unstable-kv`。
+如果当前 Deno 版本已稳定支持 KV，可移除 `--unstable-kv`。
 
-## 客户端配置
+## 路由诊断
 
-以 OpenAI 兼容客户端为例：
-
-```text
-API Base URL: https://你的域名/v1
-API Key:      管理面板中生成的网关访问密钥
-```
-
-SillyTavern 等客户端应选择 OpenAI 兼容接口，并填写相同的 Base URL 和网关访问密钥。
-
-### 请求示例
-
-```bash
-curl https://你的域名/v1/chat/completions \
-  -H "Authorization: Bearer 你的网关访问密钥" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "prefix/model-name",
-    "messages": [
-      {"role": "user", "content": "Hello"}
-    ],
-    "stream": false
-  }'
-```
-
-### 获取模型列表
-
-```bash
-curl https://你的域名/v1/models \
-  -H "Authorization: Bearer 你的网关访问密钥"
-```
-
-## 模型前缀
-
-假设渠道配置如下：
+响应包含匿名诊断头：
 
 ```text
-模型前缀：hy
-上游模型：deepseek-v4-flash
-```
-
-客户端请求：
-
-```json
-{
-  "model": "hy/deepseek-v4-flash"
-}
-```
-
-转发到该渠道时，网关会自动还原为：
-
-```json
-{
-  "model": "deepseek-v4-flash"
-}
-```
-
-模型前缀可用于区分不同提供商中名称相同的模型。
-
-## 路由诊断响应头
-
-代理响应包含两个可选诊断信息：
-
-```text
-X-Freeone-Channel: channel-3
+X-Freeone-Channel: channel-2-key-3
 X-Freeone-Attempt: 1
 ```
 
-- `X-Freeone-Channel`：实际返回响应的匿名渠道序号。
-- `X-Freeone-Attempt`：本次请求的上游尝试次数。
+它不会暴露渠道名称、Base URL 或 API Key。标准客户端会忽略未知响应头，不影响 JSON 或 SSE 兼容性。
 
-响应头不会包含渠道名称、Base URL 或 API Key。标准 HTTP 客户端会忽略不认识的自定义响应头，因此不会影响 OpenAI 客户端或 SillyTavern 对 JSON、SSE 流的解析。
+## 配置兼容
 
-PowerShell 查看方式：
+- 当前配置结构版本为 `schemaVersion: 3`。
+- 旧渠道的单个 `apiKey` 会在读取时转换成单元素 `apiKeys[]`。
+- 旧渠道默认视为 OpenAI 协议。
+- 不会自动合并 Base URL 相同的旧渠道。
+- 下一次从管理面板保存配置时会持久化新结构。
+- 旧版 KV 键 `CONFIG` 仍可通过管理面板迁移到 `CONFIG_V2`。
 
-```powershell
-$response = Invoke-WebRequest `
-  -Uri "https://你的域名/v1/chat/completions" `
-  -Method POST `
-  -Headers @{ Authorization = "Bearer 你的网关访问密钥" } `
-  -ContentType "application/json" `
-  -Body '{"model":"prefix/model-name","messages":[{"role":"user","content":"hi"}],"stream":false}'
+## 测试
 
-$response.Headers["X-Freeone-Channel"]
-$response.Headers["X-Freeone-Attempt"]
+Node.js 25+ 可运行源码级回归测试：
+
+```bash
+node tests/smoke.mjs
+node --experimental-strip-types --check main.ts
 ```
 
-## 管理接口与代理接口
+管理面板脚本语法检查：
 
-| 路径 | 方法 | 说明 |
-| --- | --- | --- |
-| `/admin` | GET | Web 管理面板 |
-| `/api/config` | GET / POST | 管理配置、登录、测速和模型拉取 |
-| `/v1/models` | GET | 返回已启用渠道的聚合模型列表 |
-| `/v1/*` | ALL | OpenAI 兼容请求代理 |
+```bash
+node -e "const fs=require('fs');const h=fs.readFileSync('admin.html','utf8');for(const [i,m] of [...h.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)].entries()){new Function(m[1]);console.log('script',i+1,'ok')}"
+```
 
 ## 安全说明
 
-- 上游 API Key 需要用于请求签名，因此会以可恢复形式保存在 Deno KV 中；请保护好 Deno Deploy 项目和管理面板权限。
-- 管理员密码使用 PBKDF2-SHA-256 和随机盐保存，不保存明文密码。
-- 管理员会话令牌在 KV 中以 SHA-256 摘要保存，默认有效期为 7 天。
-- 请使用强管理员密码，并定期轮换网关访问密钥和上游 API Key。
-- 不要把真实 API Key、管理员令牌或导出的生产配置提交到 GitHub。
-- 项目默认允许跨域访问，但 `/v1/*` 仍要求有效的网关访问密钥。
-- 如果公开分享网关访问密钥，任何持有者都可以消耗已启用渠道的上游额度。
-
-## 配置迁移
-
-如果检测到旧版 Deno KV 键 `CONFIG`，管理面板会提供迁移入口，将旧渠道与访问密钥迁移到 `CONFIG_V2`。迁移需要验证旧版管理密码，并设置新的管理员密码。
-
-## 常见问题
-
-### 配置多个“访问密钥”为什么没有轮转上游 Key？
-
-访问密钥只用于客户端鉴权。要分流多个上游 Key，需要为每个上游 Key 创建独立渠道。
-
-### 两个等权渠道为什么不是严格一人一次？
-
-Deno Deploy 是无状态、多实例环境。项目使用无状态加权随机分流，等权渠道会在足够多的请求下接近 50:50，但短时间内可能连续命中同一渠道。
-
-### 会不会每个请求同时请求所有渠道？
-
-不会。正常情况下只请求一个渠道；只有网络异常或可重试状态码出现时，才会尝试下一个渠道。
-
-### 自定义响应头会影响第三方客户端吗？
-
-不会。未知响应头会被标准客户端忽略，响应 JSON 和 SSE 数据格式没有改变。
-
-## 项目文件
-
-```text
-main.ts     # Deno/Hono 后端、鉴权、路由和代理逻辑
-admin.html  # 内置管理面板
-```
+- 上游 API Key 必须用于转发，因此以可恢复形式保存在 Deno KV；请保护管理面板和 Deno Deploy 项目权限。
+- 管理员密码使用 PBKDF2-SHA-256 和随机盐保存。
+- 管理会话令牌在 KV 中以 SHA-256 摘要保存，默认有效期 7 天。
+- 不要把真实 API Key、管理员令牌或生产配置提交到 GitHub。
+- 查询参数 `?key=` 可能出现在客户端或边缘访问日志中；能配置请求头时优先使用 `x-goog-api-key` 或 Bearer。
+- 公开分享网关访问密钥会允许持有者消耗所有已启用上游渠道的额度。
 
 ## 免责声明
 
-本项目仅作为 API 网关与开发学习工具。使用者应遵守上游服务条款、当地法律法规及相关数据安全要求，并自行承担因密钥泄露、额度消耗、上游故障或不当使用造成的风险。
+本项目仅作为 API 网关与开发学习工具。使用者应遵守上游服务条款、当地法律法规及数据安全要求，并自行承担密钥泄露、额度消耗、上游故障或不当使用造成的风险。

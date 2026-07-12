@@ -54,7 +54,7 @@
       background-image: radial-gradient(ellipse 80% 50% at 0% 0%, var(--accent-soft) 0%, transparent 60%), radial-gradient(ellipse 60% 50% at 100% 100%, var(--amber-soft) 0%, transparent 60%);
       background-attachment: fixed;
     }
-    code, .mono, input.mono { font-family: monospace; }
+    code, .mono, input.mono, textarea.mono { font-family: monospace; }
     
     /* Buttons */
     .btn {
@@ -146,6 +146,19 @@
     .empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); }
     .empty-state p { font-size: 0.9rem; }
     
+
+    .channel-group { border-radius: var(--radius); }
+    .channel-card { cursor: default; }
+    .protocol-tag { padding: 0.1rem 0.45rem; font-size: 0.7rem; background: var(--accent-soft); color: var(--accent); border-radius: 5px; text-transform: uppercase; }
+    .child-list { display: none; margin: -0.25rem 1rem 0; padding: 0.65rem; border: 1px solid var(--border); border-top: none; border-radius: 0 0 var(--radius) var(--radius); background: var(--bg-sunken); }
+    .child-list.open { display: block; }
+    .child-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.65rem; align-items: center; padding: 0.65rem 0.75rem; border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 0.45rem; }
+    .child-row:last-child { margin-bottom: 0; }
+    .child-key { font: 0.8rem monospace; color: var(--text-muted); }
+    .child-actions { display: flex; gap: 0.35rem; align-items: center; }
+    .key-hint { margin-top: 0.35rem; color: var(--text-faint); font-size: 0.75rem; }
+    .protocol-warning { display: none; padding: 0.65rem 0.75rem; border-radius: var(--radius-sm); background: var(--amber-soft); color: var(--amber); font-size: 0.78rem; margin-bottom: 1rem; }
+    textarea.key-input { min-height: 112px; resize: vertical; line-height: 1.5; }
     /* Modals */
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; animation: backdropFade 0.2s; }
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-modal); animation: modalRise 0.35s; }
@@ -320,13 +333,22 @@
         <div class="modal-body">
           <input type="hidden" id="channelId">
           <div class="form-group"><label>渠道名称</label><input type="text" id="cName" class="form-control" required></div>
+          <div class="form-group">
+            <label>协议类型</label>
+            <select id="cProtocol" class="form-control">
+              <option value="openai">OpenAI 兼容协议</option>
+              <option value="gemini">Gemini 原生协议 (v1beta)</option>
+            </select>
+          </div>
+          <div id="geminiStatefulWarning" class="protocol-warning">Gemini Files、Caches 等有状态资源只有在这些 Key 属于同一 Google 项目时才能跨 Key 正常访问。</div>
           <div class="form-group"><label>Base URL</label><input type="url" id="cBaseUrl" class="form-control" required></div>
           <div class="form-group">
-            <label>API Key</label>
+            <label>API Keys</label>
             <div class="input-with-action">
-              <input type="text" id="cApiKey" class="form-control mono" required style="-webkit-text-security: disc;" autocomplete="off">
-              <button type="button" id="toggleApiKeyVisibleBtn" class="eye-btn" title="显示/隐藏 API Key" aria-label="显示或隐藏 API Key">👁</button>
+              <textarea id="cApiKeys" class="form-control mono key-input" required style="-webkit-text-security: disc;" autocomplete="off" placeholder="每行一个 Key，也支持逗号、分号或 JSON 数组"></textarea>
+              <button type="button" id="toggleApiKeyVisibleBtn" class="eye-btn" title="显示/隐藏 API Keys" aria-label="显示或隐藏 API Keys">👁</button>
             </div>
+            <div class="key-hint">保存后每个 Key 会成为独立子渠道，并继承母渠道权重。</div>
           </div>
           <div class="form-group"><label>权重</label><input type="number" id="cWeight" class="form-control" required min="1" max="100" value="10"></div>
           <div class="form-group"><label>模型前缀</label><input type="text" id="cModelPrefix" class="form-control"></div>
@@ -388,6 +410,7 @@
 let adminToken = localStorage.getItem('cf_free_all_token_v2') || '';
 let globalConfig = null;
 let currentFetchedModels = [];
+let currentModelMetadata = {};
 
 function showToast(msg, type = 'success') {
   const toast = document.getElementById('toast');
@@ -517,66 +540,110 @@ document.querySelectorAll('.nav-item').forEach(el => el.onclick = () => {
 });
 
 // Render
-function renderChannels() {
-  const c = document.getElementById('channelsContainer');
-  if (!globalConfig.channels?.length) { c.innerHTML = '<div class="empty-state"><p>暂无渠道</p></div>'; return; }
-  c.innerHTML = globalConfig.channels.map(ch => `
-    <div class="channel-card ${ch.enabled?'':'disabled'}">
-      <div class="ch-status-dot ${ch.enabled?'':'off'}"></div>
-      <div class="ch-main">
-        <div class="ch-name">${escapeHtml(ch.name)} ${ch.modelPrefix ? `<span class="ch-prefix-tag">${escapeHtml(ch.modelPrefix)}</span>` : ''}</div>
-        <div class="ch-url">${escapeHtml(ch.baseUrl)}</div>
-        <div class="ch-meta"><span>权重 ${ch.weight}</span><span>${ch.models?.length||0} 模型</span><span id="latency-${escapeHtml(ch.id)}" class="latency-pill">--</span></div>
-      </div>
-      <div class="ch-actions">
-        <label class="switch"><input type="checkbox" data-action="toggle" data-id="${escapeHtml(ch.id)}" ${ch.enabled?'checked':''}><span class="slider"></span></label>
-        <button class="btn btn-ghost btn-sm" data-action="test" data-id="${escapeHtml(ch.id)}">测速</button>
-        <button class="btn btn-ghost btn-sm" data-action="copy" data-id="${escapeHtml(ch.id)}">复制</button>
-        <button class="btn btn-ghost btn-sm" data-action="edit" data-id="${escapeHtml(ch.id)}">编辑</button>
-        <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(ch.id)}">删除</button>
-      </div>
-    </div>
-  `).join('');
+function channelKeys(channel) {
+  if (Array.isArray(channel.apiKeys)) return channel.apiKeys;
+  return channel.apiKey ? [{ id: `${channel.id}_legacy_key`, key: channel.apiKey, enabled: true }] : [];
 }
 
-document.getElementById('channelsContainer').onclick = async (e) => {
-  const btn = e.target.closest('button');
-  const checkbox = e.target.closest('input[type="checkbox"]');
-  const action = btn?.dataset.action || checkbox?.dataset.action;
-  const id = btn?.dataset.id || checkbox?.dataset.id;
-  if (!action || !id) return;
-  
-  if (action === 'toggle') {
-    const ch = globalConfig.channels.find(c => c.id === id);
-    if (ch) {
-      ch.enabled = checkbox.checked;
-      try {
-        await saveGlobalConfig();
-        showToast(ch.enabled?'已启用':'已禁用');
-      } catch (err) { handleSaveError(err); }
-    }
-  } else if (action === 'delete') {
-    if (confirm('确认删除？')) {
-      globalConfig.channels = globalConfig.channels.filter(c => c.id !== id);
-      try {
-        await saveGlobalConfig();
-        renderChannels();
-      } catch (err) { handleSaveError(err); }
-    }
-  } else if (action === 'edit') {
-    openChannelModal(id);
-  } else if (action === 'test') {
-    testChannel(id);
-  } else if (action === 'copy') {
-    const ch = globalConfig.channels.find(c => c.id === id);
-    if (ch) {
-      globalConfig.channels.push({...ch, id: 'ch_'+Date.now(), name: ch.name+'-Copy'});
-      try {
-        await saveGlobalConfig();
-        renderChannels();
-      } catch (err) { handleSaveError(err); }
-    }
+function maskedKey(key) {
+  const suffix = String(key || '').slice(-4);
+  return `••••••••${suffix}`;
+}
+
+function renderChannels() {
+  const container = document.getElementById('channelsContainer');
+  if (!globalConfig.channels?.length) {
+    container.innerHTML = '<div class="empty-state"><p>暂无渠道</p></div>';
+    return;
   }
+  container.innerHTML = globalConfig.channels.map(channel => {
+    const keys = channelKeys(channel);
+    const enabledKeyCount = keys.filter(key => key.enabled !== false).length;
+    const childRows = keys.map((apiKey, keyIndex) => `
+      <div class="child-row ${apiKey.enabled === false ? 'disabled' : ''}">
+        <div>
+          <div class="child-key">Key ${keyIndex + 1} · ${escapeHtml(maskedKey(apiKey.key))}</div>
+          <span id="latency-${escapeHtml(channel.id)}-${escapeHtml(apiKey.id)}" class="latency-pill">--</span>
+        </div>
+        <label class="switch"><input type="checkbox" data-action="toggle-key" data-id="${escapeHtml(channel.id)}" data-key-id="${escapeHtml(apiKey.id)}" ${apiKey.enabled !== false ? 'checked' : ''}><span class="slider"></span></label>
+        <div class="child-actions">
+          <button class="btn btn-ghost btn-sm" data-action="test-key" data-id="${escapeHtml(channel.id)}" data-key-id="${escapeHtml(apiKey.id)}">测速</button>
+          <button class="btn btn-danger btn-sm" data-action="delete-key" data-id="${escapeHtml(channel.id)}" data-key-id="${escapeHtml(apiKey.id)}">删除</button>
+        </div>
+      </div>`).join('');
+    return `
+      <div class="channel-group">
+        <div class="channel-card ${channel.enabled ? '' : 'disabled'}">
+          <div class="ch-status-dot ${channel.enabled ? '' : 'off'}"></div>
+          <div class="ch-main">
+            <div class="ch-name">
+              ${escapeHtml(channel.name)}
+              <span class="protocol-tag">${channel.protocol === 'gemini' ? 'Gemini' : 'OpenAI'}</span>
+              ${channel.modelPrefix ? `<span class="ch-prefix-tag">${escapeHtml(channel.modelPrefix)}</span>` : ''}
+            </div>
+            <div class="ch-url">${escapeHtml(channel.baseUrl)}</div>
+            <div class="ch-meta"><span>权重 ${channel.weight}</span><span>${channel.models?.length || 0} 模型</span><span>${enabledKeyCount}/${keys.length} Keys</span></div>
+          </div>
+          <div class="ch-actions">
+            <label class="switch"><input type="checkbox" data-action="toggle" data-id="${escapeHtml(channel.id)}" ${channel.enabled ? 'checked' : ''}><span class="slider"></span></label>
+            <button class="btn btn-ghost btn-sm" data-action="expand" data-id="${escapeHtml(channel.id)}">子渠道</button>
+            <button class="btn btn-ghost btn-sm" data-action="test-all-keys" data-id="${escapeHtml(channel.id)}">测速</button>
+            <button class="btn btn-ghost btn-sm" data-action="copy" data-id="${escapeHtml(channel.id)}">复制</button>
+            <button class="btn btn-ghost btn-sm" data-action="edit" data-id="${escapeHtml(channel.id)}">编辑</button>
+            <button class="btn btn-danger btn-sm" data-action="delete" data-id="${escapeHtml(channel.id)}">删除</button>
+          </div>
+        </div>
+        <div class="child-list" id="children-${escapeHtml(channel.id)}">${childRows}</div>
+      </div>`;
+  }).join('');
+}
+
+document.getElementById('channelsContainer').onclick = async (event) => {
+  const button = event.target.closest('button');
+  const checkbox = event.target.closest('input[type="checkbox"]');
+  const target = button || checkbox;
+  const action = target?.dataset.action;
+  const id = target?.dataset.id;
+  const keyId = target?.dataset.keyId;
+  if (!action || !id) return;
+  const channel = globalConfig.channels.find(item => item.id === id);
+  if (!channel) return showToast('渠道不存在', 'danger');
+
+  if (action === 'expand') {
+    document.getElementById(`children-${id}`)?.classList.toggle('open');
+    return;
+  }
+  if (action === 'edit') return openChannelModal(id);
+  if (action === 'test-key') return testChannelKey(id, keyId);
+  if (action === 'test-all-keys') {
+    channelKeys(channel).filter(key => key.enabled !== false).forEach(key => testChannelKey(id, key.id));
+    return;
+  }
+  if (action === 'toggle') channel.enabled = checkbox.checked;
+  else if (action === 'toggle-key') {
+    const apiKey = channelKeys(channel).find(key => key.id === keyId);
+    if (apiKey) apiKey.enabled = checkbox.checked;
+  } else if (action === 'delete-key') {
+    if (channelKeys(channel).length <= 1) return showToast('每个渠道至少保留一个 Key', 'danger');
+    if (!confirm('确认删除这个子 Key？')) return;
+    channel.apiKeys = channelKeys(channel).filter(key => key.id !== keyId);
+  } else if (action === 'delete') {
+    if (!confirm(`确认删除母渠道及其 ${channelKeys(channel).length} 个 Key？`)) return;
+    globalConfig.channels = globalConfig.channels.filter(item => item.id !== id);
+  } else if (action === 'copy') {
+    const copy = structuredClone(channel);
+    copy.id = 'ch_' + crypto.randomUUID();
+    copy.name = channel.name + '-Copy';
+    copy.apiKeys = channelKeys(channel).map(key => ({ ...key, id: 'key_' + crypto.randomUUID() }));
+    delete copy.apiKey;
+    globalConfig.channels.push(copy);
+  } else return;
+
+  try {
+    await saveGlobalConfig();
+    renderChannels();
+    showToast(action.startsWith('toggle') ? '状态已更新' : '已保存');
+  } catch (err) { handleSaveError(err); }
 };
 
 function renderKeys() {
@@ -609,132 +676,214 @@ document.getElementById('keysContainer').onclick = async (e) => {
 };
 
 // Channel Modal
-function openChannelModal(id = null) {
-  document.getElementById('channelForm').reset();
-  currentFetchedModels = []; updatePreview();
-  document.getElementById('channelId').value = id || '';
-  if (id) {
-    const ch = globalConfig.channels.find(c => c.id === id);
-    if (!ch) return showToast('渠道不存在', 'danger');
-    document.getElementById('cName').value = ch.name;
-    document.getElementById('cBaseUrl').value = ch.baseUrl;
-    document.getElementById('cApiKey').value = ch.apiKey; // Plaintext visible to admin
-    document.getElementById('cWeight').value = ch.weight;
-    document.getElementById('cModelPrefix').value = ch.modelPrefix || '';
-    document.getElementById('cFilterMode').value = ch.filterMode || 'none';
-    document.getElementById('cFilterKeywords').value = ch.filterKeywords || '';
-    currentFetchedModels = ch.fetchedModels || [];
-    if (currentFetchedModels.length) {
-      document.getElementById('filterModeGroup').style.display = 'block';
-      renderCheckboxes(currentFetchedModels, ch.selectedModels || []);
-    }
-  }
-  document.getElementById('channelModal').style.display = 'flex';
-  syncFilterUI();
+function parseApiKeysInput(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return [];
+  let values;
+  try {
+    const parsed = JSON.parse(raw);
+    values = Array.isArray(parsed) && parsed.every(item => typeof item === 'string') ? parsed : null;
+  } catch (_) { values = null; }
+  if (!values) values = raw.split(/[\r\n,;]+/);
+  const seen = new Set();
+  return values.flatMap(value => {
+    const key = String(value).trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+    if (!key || seen.has(key)) return [];
+    seen.add(key);
+    return [key];
+  });
 }
 
-['btnCloseChannelModal', 'btnCancelChannelModal'].forEach(id => document.getElementById(id).onclick = (e) => { e.preventDefault(); document.getElementById('channelModal').style.display = 'none'; });
+function syncProtocolUI() {
+  const isGemini = document.getElementById('cProtocol').value === 'gemini';
+  document.getElementById('geminiStatefulWarning').style.display = isGemini ? 'block' : 'none';
+}
 
+function openChannelModal(id = null) {
+  document.getElementById('channelForm').reset();
+  currentFetchedModels = [];
+  currentModelMetadata = {};
+  document.getElementById('filterModeGroup').style.display = 'none';
+  document.getElementById('channelId').value = id || '';
+  document.getElementById('cProtocol').value = 'openai';
+  document.getElementById('cWeight').value = 10;
+  if (id) {
+    const channel = globalConfig.channels.find(item => item.id === id);
+    if (!channel) return showToast('渠道不存在', 'danger');
+    document.getElementById('modalTitle').innerText = '编辑母渠道';
+    document.getElementById('cName').value = channel.name;
+    document.getElementById('cProtocol').value = channel.protocol || 'openai';
+    document.getElementById('cBaseUrl').value = channel.baseUrl;
+    document.getElementById('cApiKeys').value = channelKeys(channel).map(item => item.key).join('\n');
+    document.getElementById('cWeight').value = channel.weight;
+    document.getElementById('cModelPrefix').value = channel.modelPrefix || '';
+    document.getElementById('cFilterMode').value = channel.filterMode || 'none';
+    document.getElementById('cFilterKeywords').value = channel.filterKeywords || '';
+    currentFetchedModels = channel.fetchedModels || [];
+    currentModelMetadata = channel.modelMetadata || {};
+    if (currentFetchedModels.length) {
+      document.getElementById('filterModeGroup').style.display = 'block';
+      renderCheckboxes(currentFetchedModels, channel.selectedModels || []);
+    }
+  } else {
+    document.getElementById('modalTitle').innerText = '添加母渠道';
+    document.getElementById('cApiKeys').value = '';
+  }
+  document.getElementById('cApiKeys').style.webkitTextSecurity = 'disc';
+  document.getElementById('channelModal').style.display = 'flex';
+  syncProtocolUI();
+  syncFilterUI();
+  updatePreview();
+}
+
+document.getElementById('btnAddChannel').onclick = () => openChannelModal();
+['btnCloseChannelModal', 'btnCancelChannelModal'].forEach(id => document.getElementById(id).onclick = (event) => {
+  event.preventDefault();
+  document.getElementById('channelModal').style.display = 'none';
+});
+
+document.getElementById('cProtocol').onchange = syncProtocolUI;
 document.getElementById('cFilterMode').onchange = syncFilterUI;
 document.getElementById('cModelPrefix').oninput = updatePreview;
 document.getElementById('cFilterKeywords').oninput = updatePreview;
 
 function syncFilterUI() {
-  const m = document.getElementById('cFilterMode').value;
-  document.getElementById('filterKeywordsGroup').style.display = m === 'keyword' ? 'block' : 'none';
-  document.getElementById('filterManualGroup').style.display = m === 'manual' ? 'block' : 'none';
+  const mode = document.getElementById('cFilterMode').value;
+  document.getElementById('filterKeywordsGroup').style.display = mode === 'keyword' ? 'block' : 'none';
+  document.getElementById('filterManualGroup').style.display = mode === 'manual' ? 'block' : 'none';
   updatePreview();
 }
 
 function renderCheckboxes(models, selected) {
-  document.getElementById('modelsCheckboxList').innerHTML = models.map(m => `
-    <label class="model-item"><input type="checkbox" value="${escapeHtml(m)}" ${selected.includes(m)?'checked':''}><span>${escapeHtml(m)}</span></label>
+  document.getElementById('modelsCheckboxList').innerHTML = models.map(model => `
+    <label class="model-item"><input type="checkbox" value="${escapeHtml(model)}" ${selected.includes(model) ? 'checked' : ''}><span>${escapeHtml(model)}</span></label>
   `).join('');
-  document.querySelectorAll('.model-item input').forEach(el => el.onchange = updatePreview);
+  document.querySelectorAll('.model-item input').forEach(element => element.onchange = updatePreview);
 }
 
 function updatePreview() {
   const prefix = document.getElementById('cModelPrefix').value.trim().replace(/\/+$/, '');
   const mode = document.getElementById('cFilterMode').value;
-  let o = currentFetchedModels;
+  let originals = currentFetchedModels;
   if (mode === 'keyword') {
-    const kw = document.getElementById('cFilterKeywords').value.toLowerCase().split(',').map(s=>s.trim()).filter(s=>s);
-    if (kw.length) o = o.filter(m => kw.some(k => m.toLowerCase().includes(k)));
+    const keywords = document.getElementById('cFilterKeywords').value.toLowerCase().split(',').map(item => item.trim()).filter(Boolean);
+    if (keywords.length) originals = originals.filter(model => keywords.some(keyword => model.toLowerCase().includes(keyword)));
   } else if (mode === 'manual') {
-    o = Array.from(document.querySelectorAll('.model-item input:checked')).map(el => el.value);
+    originals = Array.from(document.querySelectorAll('.model-item input:checked')).map(element => element.value);
   }
-  const f = o.map(m => prefix ? `${prefix}/${m}` : m);
-  document.getElementById('modelsPreviewArea').innerText = f.length ? f.join('\n') : '--';
-  document.getElementById('previewCount').innerText = f.length;
+  const exposed = originals.map(model => prefix ? `${prefix}/${model}` : model);
+  document.getElementById('modelsPreviewArea').innerText = exposed.length ? exposed.join('\n') : '--';
+  document.getElementById('previewCount').innerText = exposed.length;
 }
 
 document.getElementById('btnFetchModels').onclick = async () => {
-  const baseUrl = document.getElementById('cBaseUrl').value;
-  const apiKey = document.getElementById('cApiKey').value;
-  if(!baseUrl||!apiKey) return showToast('需URL与Key','danger');
-  document.getElementById('modelsLoadingText').style.display='flex';
+  const baseUrl = document.getElementById('cBaseUrl').value.trim();
+  const protocol = document.getElementById('cProtocol').value;
+  const parsedKeys = parseApiKeysInput(document.getElementById('cApiKeys').value);
+  const editingId = document.getElementById('channelId').value;
+  const editingChannel = editingId ? globalConfig.channels.find(channel => channel.id === editingId) : null;
+  const apiKeys = parsedKeys.filter(key => {
+    const existingKey = editingChannel ? channelKeys(editingChannel).find(item => item.key === key) : null;
+    return !existingKey || existingKey.enabled !== false;
+  });
+  if (!baseUrl || !parsedKeys.length) return showToast('需填写 URL 与至少一个 Key', 'danger');
+  if (!apiKeys.length) return showToast('至少启用一个 Key 后才能拉取模型', 'danger');
+  document.getElementById('modelsLoadingText').style.display = 'flex';
   try {
-    const res = await apiCall('fetch_upstream_models', { baseUrl, apiKey });
-    if(res.status==='ok') {
-      currentFetchedModels = res.models || [];
-      document.getElementById('filterModeGroup').style.display='block';
-      renderCheckboxes(currentFetchedModels, currentFetchedModels); syncFilterUI(); showToast('获取成功');
-    } else showToast(res.message, 'danger');
-  } catch(e) { showToast(e?.message || '失败','danger'); }
-  document.getElementById('modelsLoadingText').style.display='none';
+    const result = await apiCall('fetch_upstream_models', { baseUrl, protocol, apiKeys });
+    if (result.status === 'ok') {
+      currentFetchedModels = result.models || [];
+      currentModelMetadata = result.modelMetadata || {};
+      document.getElementById('filterModeGroup').style.display = 'block';
+      renderCheckboxes(currentFetchedModels, currentFetchedModels);
+      syncFilterUI();
+      showToast(`获取成功：${currentFetchedModels.length} 个模型`);
+    } else showToast(result.message || '获取失败', 'danger');
+  } catch (error) { showToast(error?.message || '获取失败', 'danger'); }
+  document.getElementById('modelsLoadingText').style.display = 'none';
 };
 
 document.getElementById('toggleApiKeyVisibleBtn').onclick = () => {
-  const inp = document.getElementById('cApiKey');
-  inp.style.webkitTextSecurity = inp.style.webkitTextSecurity === 'none' ? 'disc' : 'none';
+  const input = document.getElementById('cApiKeys');
+  input.style.webkitTextSecurity = input.style.webkitTextSecurity === 'none' ? 'disc' : 'none';
 };
 
-document.getElementById('channelForm').onsubmit = async (e) => {
-  e.preventDefault();
-  const id = document.getElementById('channelId').value || 'ch_' + Date.now();
-  const name = document.getElementById('cName').value;
-  const baseUrl = document.getElementById('cBaseUrl').value;
-  const apiKey = document.getElementById('cApiKey').value; // plaintext save
+document.getElementById('channelForm').onsubmit = async (event) => {
+  event.preventDefault();
+  const id = document.getElementById('channelId').value || 'ch_' + crypto.randomUUID();
+  const existing = globalConfig.channels.find(channel => channel.id === id);
+  const parsedKeys = parseApiKeysInput(document.getElementById('cApiKeys').value);
+  if (!parsedKeys.length) return showToast('至少需要一个 API Key', 'danger');
+  const oldKeys = existing ? channelKeys(existing) : [];
+  const apiKeys = parsedKeys.map(key => {
+    const previous = oldKeys.find(item => item.key === key);
+    return previous ? { ...previous } : { id: 'key_' + crypto.randomUUID(), key, enabled: true };
+  });
   let weight = parseInt(document.getElementById('cWeight').value);
-  if (isNaN(weight)) weight = 10;
-  const modelPrefix = document.getElementById('cModelPrefix').value;
+  if (!Number.isFinite(weight) || weight <= 0) weight = 10;
+  const modelPrefix = document.getElementById('cModelPrefix').value.trim().replace(/\/+$/, '');
   const filterMode = document.getElementById('cFilterMode').value;
   const filterKeywords = document.getElementById('cFilterKeywords').value;
-  const selectedModels = Array.from(document.querySelectorAll('.model-item input:checked')).map(cb=>cb.value);
-
-  const prefix = modelPrefix.replace(/\/+$/, '');
-  let orig = currentFetchedModels;
-  if(filterMode==='keyword') {
-    const kw = filterKeywords.split(',').map(s=>s.trim().toLowerCase()).filter(s=>s);
-    if(kw.length) orig = orig.filter(m => kw.some(k=>m.toLowerCase().includes(k)));
-  } else if (filterMode==='manual') orig = selectedModels;
-  const models = orig.map(m => prefix ? `${prefix}/${m}` : m);
-
-  const chData = { id, name, baseUrl, apiKey, weight, modelPrefix, filterMode, filterKeywords, selectedModels, fetchedModels: currentFetchedModels, models, enabled: true };
-  
-  const idx = globalConfig.channels.findIndex(c => c.id === id);
-  if (idx > -1) { chData.enabled = globalConfig.channels[idx].enabled; globalConfig.channels[idx] = chData; }
-  else globalConfig.channels.push(chData);
+  const selectedModels = Array.from(document.querySelectorAll('.model-item input:checked')).map(input => input.value);
+  let originals = currentFetchedModels;
+  if (filterMode === 'keyword') {
+    const keywords = filterKeywords.split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+    if (keywords.length) originals = originals.filter(model => keywords.some(keyword => model.toLowerCase().includes(keyword)));
+  } else if (filterMode === 'manual') originals = selectedModels;
+  const models = originals.map(model => modelPrefix ? `${modelPrefix}/${model}` : model);
+  const channelData = {
+    id,
+    name: document.getElementById('cName').value.trim(),
+    protocol: document.getElementById('cProtocol').value,
+    baseUrl: document.getElementById('cBaseUrl').value.trim(),
+    apiKeys,
+    weight,
+    modelPrefix,
+    filterMode,
+    filterKeywords,
+    selectedModels,
+    fetchedModels: currentFetchedModels,
+    models,
+    modelMetadata: currentModelMetadata,
+    enabled: existing ? existing.enabled : true
+  };
+  if (existing) globalConfig.channels[globalConfig.channels.indexOf(existing)] = channelData;
+  else globalConfig.channels.push(channelData);
 
   try {
     await saveGlobalConfig();
     document.getElementById('channelModal').style.display = 'none';
-    renderChannels(); showToast('已保存');
-  } catch (err) { handleSaveError(err); }
+    renderChannels();
+    showToast('已保存');
+  } catch (error) { handleSaveError(error); }
 };
 
-async function testChannel(id) {
-  const el = document.getElementById(`latency-${id}`);
-  if (!el) return;
-  el.className = 'latency-pill testing'; el.innerText = '测速…';
+async function testChannelKey(channelId, keyId) {
+  const element = document.getElementById(`latency-${channelId}-${keyId}`);
+  if (!element) return;
+  element.className = 'latency-pill testing';
+  element.innerText = '测速…';
+  const startedAt = Date.now();
   try {
-    const st = Date.now();
-    const r = await apiCall('ping', { channelId: id });
-    if (r.status === 'ok') { el.className = 'latency-pill ok'; el.innerText = (Date.now()-st)+'ms'; }
-    else { el.className = 'latency-pill bad'; el.innerText = '错误'; }
-  } catch(e) { el.className = 'latency-pill bad'; el.innerText = '离线'; }
+    const result = await apiCall('ping', { channelId, keyId });
+    if (result.status === 'ok') {
+      element.className = 'latency-pill ok';
+      element.innerText = `${Date.now() - startedAt}ms`;
+    } else {
+      element.className = 'latency-pill bad';
+      element.innerText = `HTTP ${result.statusCode || '错误'}`;
+    }
+  } catch (_) {
+    element.className = 'latency-pill bad';
+    element.innerText = '离线';
+  }
 }
-document.getElementById('btnTestAll').onclick = () => { globalConfig.channels.forEach(c => { if(c.enabled) testChannel(c.id); }); };
+
+document.getElementById('btnTestAll').onclick = () => {
+  globalConfig.channels.filter(channel => channel.enabled).forEach(channel => {
+    channelKeys(channel).filter(key => key.enabled !== false).forEach(key => testChannelKey(channel.id, key.id));
+  });
+};
 
 // Keys Modal
 document.getElementById('btnAddKey').onclick = () => { document.getElementById('customKeyInput').value = 'sk-' + crypto.randomUUID().replace(/-/g,''); document.getElementById('keyModal').style.display='flex'; };

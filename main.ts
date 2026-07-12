@@ -31,7 +31,7 @@ const app = new Hono();
 app.use("*", cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization", "x-requested-with"],
+  allowHeaders: ["Content-Type", "Authorization", "x-requested-with", "x-goog-api-key"],
   maxAge: 86400
 }));
 
@@ -47,7 +47,12 @@ app.get("/", (c) => Response.redirect(new URL("/admin", c.req.url).toString(), 3
   app.get(path, (c) => handleModelsList(c.req.raw))
 );
 
-app.all("/v1/*", (c) => handleProxy(c.req.raw));
+["/v1beta/models", "/v1beta/models/"].forEach((path) =>
+  app.get(path, (c) => handleGeminiModelsList(c.req.raw))
+);
+
+app.all("/v1beta/*", (c) => handleGeminiProxy(c.req.raw));
+app.all("/v1/*", (c) => handleOpenAIProxy(c.req.raw));
 
 app.notFound(() =>
   jsonResponse({ error: { message: "Not Found", type: "invalid_request_error", code: "404" } }, 404)
@@ -81,7 +86,7 @@ function getCorsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-requested-with',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-requested-with, x-goog-api-key',
     'Access-Control-Expose-Headers': 'X-Freeone-Channel, X-Freeone-Attempt',
     'Access-Control-Max-Age': '86400'
   };
@@ -121,6 +126,79 @@ function parseKvValue(value: unknown, fallback: any = null) {
   return value ? (typeof value === 'string' ? JSON.parse(value) : value) : fallback;
 }
 
+function stringArray(value: any) {
+  return Array.isArray(value) ? value.filter((item: any) => typeof item === 'string') : [];
+}
+
+function normalizeChannel(channel: any, index: number) {
+  const id = typeof channel?.id === 'string' && channel.id ? channel.id : `ch_normalized_${index}`;
+  const rawKeys = Array.isArray(channel?.apiKeys)
+    ? channel.apiKeys
+    : (typeof channel?.apiKey === 'string' && channel.apiKey.trim()
+      ? [{ id: `${id}_legacy_key`, key: channel.apiKey, enabled: true }]
+      : []);
+  const seenKeys = new Set<string>();
+  const apiKeys = rawKeys.flatMap((entry: any, keyIndex: number) => {
+    const key = typeof entry === 'string' ? entry.trim() : (typeof entry?.key === 'string' ? entry.key.trim() : '');
+    if (!key || seenKeys.has(key)) return [];
+    seenKeys.add(key);
+    return [{
+      id: typeof entry?.id === 'string' && entry.id ? entry.id : `${id}_key_${keyIndex}`,
+      key,
+      enabled: entry?.enabled !== false
+    }];
+  });
+  const protocol = channel?.protocol === 'gemini' ? 'gemini' : 'openai';
+  const filterMode = ['none', 'keyword', 'manual'].includes(channel?.filterMode) ? channel.filterMode : 'none';
+  return {
+    id,
+    name: typeof channel?.name === 'string' && channel.name ? channel.name : `Channel ${index + 1}`,
+    protocol,
+    baseUrl: typeof channel?.baseUrl === 'string' ? channel.baseUrl : '',
+    weight: Number.isFinite(Number(channel?.weight)) && Number(channel.weight) > 0 ? Number(channel.weight) : 10,
+    enabled: channel?.enabled !== false,
+    apiKeys,
+    modelPrefix: typeof channel?.modelPrefix === 'string' ? channel.modelPrefix : '',
+    filterMode,
+    filterKeywords: typeof channel?.filterKeywords === 'string' ? channel.filterKeywords : '',
+    selectedModels: stringArray(channel?.selectedModels),
+    fetchedModels: stringArray(channel?.fetchedModels),
+    models: stringArray(channel?.models),
+    modelMetadata: channel?.modelMetadata && typeof channel.modelMetadata === 'object' && !Array.isArray(channel.modelMetadata)
+      ? channel.modelMetadata
+      : {}
+  };
+}
+
+function normalizeConfigShape(config: any) {
+  if (!config || typeof config !== 'object') return config;
+  return {
+    ...config,
+    schemaVersion: 3,
+    accessKeys: stringArray(config.accessKeys).map((key: string) => key.trim()).filter(Boolean),
+    channels: Array.isArray(config.channels) ? config.channels.map(normalizeChannel) : []
+  };
+}
+
+function expandRuntimeChannels(config: any, protocol: 'openai' | 'gemini') {
+  const groups = Array.isArray(config?.channels) ? config.channels : [];
+  return groups.flatMap((channel: any, parentIndex: number) => {
+    if (!channel.enabled || channel.protocol !== protocol) return [];
+    return (channel.apiKeys || []).flatMap((apiKey: any, keyIndex: number) => {
+      if (!apiKey.enabled || !apiKey.key) return [];
+      return [{
+        ...channel,
+        id: `${channel.id}::${apiKey.id}`,
+        parentId: channel.id,
+        keyId: apiKey.id,
+        parentIndex,
+        keyIndex,
+        apiKey: apiKey.key
+      }];
+    });
+  });
+}
+
 async function getRawConfig() {
   const now = Date.now();
   if (configCache && (now - configCacheTime < CACHE_TTL_MS)) return configCache;
@@ -131,7 +209,7 @@ async function getRawConfig() {
     try {
       if (!kv) throw new Error("KV not init");
       const result = await kv.get([configKey]);
-      const freshConfig = parseKvValue(result.value);
+      const freshConfig = normalizeConfigShape(parseKvValue(result.value));
       if (readGeneration === configCacheGeneration) {
         configCache = freshConfig;
         configCacheTime = Date.now();
@@ -152,7 +230,7 @@ async function updateConfig(modifier: (config: any) => any) {
   if (!kv) throw new Error('KV unavailable');
   for (let retries = 5; retries > 0; retries--) {
     const res = await kv.get([configKey]);
-    const currentConfig = parseKvValue(res.value, {});
+    const currentConfig = normalizeConfigShape(parseKvValue(res.value, {}));
 
     // N5: cleanup sessions on every write
     if (currentConfig.sessions) currentConfig.sessions = currentConfig.sessions.filter((s: any) => s.expiresAt > Date.now());
@@ -184,26 +262,14 @@ function getLegacyMigrationInfo(legacyConfig: any) {
 }
 
 function normalizeLegacyConfig(legacyConfig: any) {
-  const stringArray = (value: any) => Array.isArray(value) ? value.filter((m: any) => typeof m === 'string') : [];
-  const accessKeys = stringArray(legacyConfig?.accessKeys).filter((key: string) => key.trim());
-
+  const accessKeys = stringArray(legacyConfig?.accessKeys).map((key: string) => key.trim()).filter(Boolean);
   const channels = Array.isArray(legacyConfig?.channels)
-    ? legacyConfig.channels.map((ch: any, index: number) => ({
-      id: typeof ch.id === 'string' && ch.id ? ch.id : `ch_migrated_${Date.now()}_${index}`,
-      name: typeof ch.name === 'string' && ch.name ? ch.name : `Migrated Channel ${index + 1}`,
-      baseUrl: typeof ch.baseUrl === 'string' ? ch.baseUrl : '',
-      weight: typeof ch.weight === 'number' ? ch.weight : 10,
-      enabled: ch.enabled !== false,
-      apiKey: typeof ch.apiKey === 'string' ? ch.apiKey : '',
-      modelPrefix: typeof ch.modelPrefix === 'string' ? ch.modelPrefix : '',
-      filterMode: ['none', 'keyword', 'manual'].includes(ch.filterMode) ? ch.filterMode : 'none',
-      filterKeywords: typeof ch.filterKeywords === 'string' ? ch.filterKeywords : '',
-      selectedModels: stringArray(ch.selectedModels),
-      fetchedModels: stringArray(ch.fetchedModels),
-      models: stringArray(ch.models)
-    }))
+    ? legacyConfig.channels.map((channel: any, index: number) => normalizeChannel({
+      ...channel,
+      id: typeof channel?.id === 'string' && channel.id ? channel.id : `ch_migrated_${Date.now()}_${index}`,
+      protocol: 'openai'
+    }, index))
     : [];
-
   return { accessKeys, channels };
 }
 
@@ -253,8 +319,8 @@ const adminPostSchemas = {
   login: v.object({ action: v.literal('login'), password: v.optional(v.string()) }),
   update: v.object({ action: v.literal('update'), config: v.unknown() }),
   changePassword: v.object({ action: v.literal('changePassword'), oldPassword: v.string(), newPassword: passwordInputSchema }),
-  ping: v.object({ action: v.literal('ping'), channelId: v.string() }),
-  fetchUpstreamModels: v.object({ action: v.literal('fetch_upstream_models'), baseUrl: v.string(), apiKey: v.string() })
+  ping: v.object({ action: v.literal('ping'), channelId: v.string(), keyId: v.optional(v.string()) }),
+  fetchUpstreamModels: v.object({ action: v.literal('fetch_upstream_models'), baseUrl: v.string(), protocol: v.optional(v.string()), apiKeys: v.optional(v.array(v.string())), apiKey: v.optional(v.string()) })
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -330,10 +396,24 @@ async function getAdminConfig(config: any, isAuthenticated: boolean) {
 
   return jsonResponse({
     initialized: true,
+    schemaVersion: 3,
     configVersion: config.configVersion || 0,
     accessKeys: config.accessKeys || [],
-    channels: (config.channels || []).map(({ id, name, baseUrl, weight, enabled, apiKey, modelPrefix = '', filterMode = 'none', filterKeywords = '', selectedModels = [], fetchedModels = [], models = [] }: any) => ({
-      id, name, baseUrl, weight, enabled, apiKey, modelPrefix, filterMode, filterKeywords, selectedModels, fetchedModels, models
+    channels: (config.channels || []).map((channel: any) => ({
+      id: channel.id,
+      name: channel.name,
+      protocol: channel.protocol,
+      baseUrl: channel.baseUrl,
+      weight: channel.weight,
+      enabled: channel.enabled,
+      apiKeys: channel.apiKeys,
+      modelPrefix: channel.modelPrefix || '',
+      filterMode: channel.filterMode || 'none',
+      filterKeywords: channel.filterKeywords || '',
+      selectedModels: channel.selectedModels || [],
+      fetchedModels: channel.fetchedModels || [],
+      models: channel.models || [],
+      modelMetadata: channel.modelMetadata || {}
     }))
   });
 }
@@ -371,7 +451,8 @@ async function migrateV1Config(request: Request, config: any, body: Record<strin
         sessions: [],
         migratedFrom: 'CONFIG',
         migratedAt: new Date().toISOString(),
-        configVersion: 1
+        configVersion: 1,
+        schemaVersion: 3
       };
     });
     return jsonResponse({ message: 'V1 配置迁移完成', channelCount: migrated.channels.length, accessKeyCount: migrated.accessKeys.length });
@@ -388,7 +469,7 @@ async function initAdminConfig(config: any, body: Record<string, unknown>) {
   return writeAction("Init failed:", 'Init failed', async () => {
     await updateConfig((c: any) => {
       if (c.initialized) throw new ConfigConflictError();
-      return { initialized: true, adminPasswordHash: hash, adminPasswordSalt: salt, accessKeys: [], channels: [], sessions: [], configVersion: 1 };
+      return { initialized: true, adminPasswordHash: hash, adminPasswordSalt: salt, accessKeys: [], channels: [], sessions: [], configVersion: 1, schemaVersion: 3 };
     });
     return jsonResponse({ message: 'Initialized successfully' });
   });
@@ -428,8 +509,13 @@ async function updateAdminConfig(body: Record<string, unknown>) {
     const updatedConfig = await updateConfig((c: any) => {
       const currentVersion = c.configVersion || 0;
       if (typeof clientConfig.configVersion === 'number' && clientConfig.configVersion !== currentVersion) throw new ConfigConflictError();
-      c.accessKeys = clientConfig.accessKeys || [];
-      c.channels = clientConfig.channels || [];
+      const normalizedClientConfig = normalizeConfigShape(clientConfig);
+      if (normalizedClientConfig.channels.some((channel: any) => !channel.baseUrl || channel.apiKeys.length === 0)) {
+        throw new Error('每个渠道都必须包含 Base URL 和至少一个 API Key');
+      }
+      c.accessKeys = normalizedClientConfig.accessKeys;
+      c.channels = normalizedClientConfig.channels;
+      c.schemaVersion = 3;
       c.configVersion = currentVersion + 1;
       return c;
     });
@@ -459,44 +545,86 @@ async function changeAdminPassword(config: any, body: Record<string, unknown>) {
 }
 
 async function pingChannel(config: any, body: Record<string, unknown>) {
-  const channelId = parseAdminBody(adminPostSchemas.ping, body)?.channelId;
-  const ch = (config.channels || []).find((c: any) => c.id === channelId);
-  if (!ch) return jsonResponse({ message: 'Channel not found' }, 404);
+  const parsed = parseAdminBody(adminPostSchemas.ping, body);
+  const channelId = parsed?.channelId;
+  const keyId = parsed?.keyId;
+  const channel = (config.channels || []).find((item: any) => item.id === channelId);
+  if (!channel) return jsonResponse({ message: 'Channel not found' }, 404);
+  const apiKey = (channel.apiKeys || []).find((item: any) => item.id === keyId) || (channel.apiKeys || []).find((item: any) => item.enabled);
+  if (!apiKey) return jsonResponse({ message: 'API Key not found' }, 404);
 
   try {
-    const pingRes = await fetchModelsEndpoint(ch.baseUrl, ch.apiKey, 5000);
+    const pingRes = await fetchModelsEndpoint(channel.baseUrl, apiKey.key, channel.protocol, 5000);
+    if (!pingRes.ok) return jsonResponse({ status: 'error', statusCode: pingRes.status });
+    if (pingRes.body) await pingRes.body.cancel().catch(() => {});
     return jsonResponse({ status: 'ok', statusCode: pingRes.status });
   } catch (_err) {
     return jsonResponse({ status: 'error', error: 'Fetch failed' });
   }
 }
 
-function fetchModelsEndpoint(baseUrl: string, apiKey: string, timeoutMs: number) {
-  return fetch(getTargetUrl(baseUrl, '/v1/models'), {
+function fetchModelsEndpoint(baseUrl: string, apiKey: string, protocol: string, timeoutMs: number) {
+  const isGemini = protocol === 'gemini';
+  const headers = isGemini
+    ? { 'x-goog-api-key': apiKey }
+    : { 'Authorization': `Bearer ${apiKey}` };
+  return fetch(getTargetUrl(baseUrl, isGemini ? '/v1beta/models' : '/v1/models'), {
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${apiKey}` },
+    headers,
     signal: AbortSignal.timeout(timeoutMs)
   });
 }
 
 async function fetchUpstreamModels(body: Record<string, unknown>) {
-  const parsedBody = parseAdminBody(adminPostSchemas.fetchUpstreamModels, body);
-  const baseUrl = parsedBody?.baseUrl ?? getStringField(body, 'baseUrl');
-  const apiKey = parsedBody?.apiKey ?? getStringField(body, 'apiKey');
-  if (!baseUrl || !apiKey) return jsonResponse({ message: 'Missing params' }, 400);
+  const parsed = parseAdminBody(adminPostSchemas.fetchUpstreamModels, body);
+  const baseUrl = parsed?.baseUrl ?? getStringField(body, 'baseUrl');
+  const protocol = parsed?.protocol === 'gemini' ? 'gemini' : 'openai';
+  const suppliedKeys = Array.isArray(parsed?.apiKeys) ? parsed.apiKeys : [];
+  const legacyKey = parsed?.apiKey ?? getStringField(body, 'apiKey');
+  const apiKeys = [...new Set([...suppliedKeys, legacyKey].map((key: string) => key.trim()).filter(Boolean))];
+  if (!baseUrl || apiKeys.length === 0) return jsonResponse({ message: 'Missing params' }, 400);
 
-  try {
-    const modelsRes = await fetchModelsEndpoint(baseUrl, apiKey, 10000);
-    if (!modelsRes.ok) return jsonResponse({ status: 'error', message: `HTTP ${modelsRes.status}` });
-    const data = await modelsRes.json();
-    return jsonResponse({ status: 'ok', models: (data.data || []).map((m: any) => m.id) });
-  } catch (_err) {
-    return jsonResponse({ status: 'error', message: 'Fetch error' });
+  let lastMessage = 'Fetch error';
+  for (const apiKey of apiKeys) {
+    try {
+      const modelsRes = await fetchModelsEndpoint(baseUrl, apiKey, protocol, 10000);
+      if (!modelsRes.ok) {
+        lastMessage = `HTTP ${modelsRes.status}`;
+        if (modelsRes.body) await modelsRes.body.cancel().catch(() => {});
+        continue;
+      }
+      const data = await modelsRes.json();
+      if (protocol === 'gemini') {
+        const metadata: Record<string, any> = {};
+        const models = (Array.isArray(data.models) ? data.models : []).flatMap((model: any) => {
+          if (typeof model?.name !== 'string') return [];
+          const id = model.name.replace(/^models\//, '');
+          metadata[id] = model;
+          return [id];
+        });
+        return jsonResponse({ status: 'ok', models, modelMetadata: metadata });
+      }
+      return jsonResponse({ status: 'ok', models: (data.data || []).map((model: any) => model.id), modelMetadata: {} });
+    } catch (_err) {
+      lastMessage = 'Fetch error';
+    }
   }
+  return jsonResponse({ status: 'error', message: lastMessage });
 }
 
 // --- Proxy ---
-async function getAuthorizedGatewayConfig(request: Request, initMessage: string) {
+function getPresentedGatewayKeys(request: Request, protocol: 'openai' | 'gemini') {
+  const bearer = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (protocol === 'openai') return [bearer].filter(Boolean);
+  const url = new URL(request.url);
+  return [
+    bearer,
+    (request.headers.get('x-goog-api-key') || '').trim(),
+    (url.searchParams.get('key') || '').trim()
+  ].filter(Boolean);
+}
+
+async function getAuthorizedGatewayConfig(request: Request, initMessage: string, protocol: 'openai' | 'gemini' = 'openai') {
   let config;
   try {
     config = await getRawConfig();
@@ -505,141 +633,234 @@ async function getAuthorizedGatewayConfig(request: Request, initMessage: string)
   }
   if (!config) return jsonResponse({ error: { message: initMessage } }, 503);
 
-  const clientKey = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
-  if (!(config.accessKeys || []).some((k: string) => timingSafeEqual(k, clientKey))) {
+  const presentedKeys = getPresentedGatewayKeys(request, protocol);
+  const authorized = presentedKeys.some((presentedKey: string) =>
+    (config.accessKeys || []).some((configuredKey: string) => timingSafeEqual(configuredKey, presentedKey))
+  );
+  if (!authorized) {
     return jsonResponse({ error: { message: 'Incorrect API key', code: 'invalid_api_key' } }, 401);
   }
   return config;
 }
 
 async function handleModelsList(request: Request) {
-  const config = await getAuthorizedGatewayConfig(request, 'Gateway not initialized');
+  const config = await getAuthorizedGatewayConfig(request, 'Gateway not initialized', 'openai');
   if (config instanceof Response) return config;
 
-  const modelSet = new Set();
-  const enabledChannels = (config.channels || []).filter((ch: any) => ch.enabled);
-  for (const ch of enabledChannels) {
-    if (Array.isArray(ch.models)) ch.models.forEach((m: string) => modelSet.add(m));
+  const modelSet = new Set<string>();
+  const enabledGroups = (config.channels || []).filter((channel: any) =>
+    channel.enabled && channel.protocol === 'openai' && (channel.apiKeys || []).some((key: any) => key.enabled)
+  );
+  for (const channel of enabledGroups) {
+    if (Array.isArray(channel.models)) channel.models.forEach((model: string) => modelSet.add(model));
   }
 
   const modelsData = Array.from(modelSet).map(id => ({
-    id, object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'cf-free-all'
+    id, object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'deno-free-all'
   }));
   return jsonResponse({ object: 'list', data: modelsData });
 }
 
-async function handleProxy(request: Request) {
-  const config = await getAuthorizedGatewayConfig(request, 'Gateway not init');
+async function handleGeminiModelsList(request: Request) {
+  const config = await getAuthorizedGatewayConfig(request, 'Gateway not initialized', 'gemini');
   if (config instanceof Response) return config;
 
-  const enabledChannels = (config.channels || []).filter((ch: any) => ch.enabled);
-  if (enabledChannels.length === 0) return jsonResponse({ error: { message: 'No channels' } }, 503);
+  const models = new Map<string, any>();
+  const groups = (config.channels || []).filter((channel: any) =>
+    channel.enabled && channel.protocol === 'gemini' && (channel.apiKeys || []).some((key: any) => key.enabled)
+  );
+  for (const channel of groups) {
+    for (const exposedModel of channel.models || []) {
+      if (models.has(exposedModel)) continue;
+      const originalModel = getOriginalModelForChannel(channel, exposedModel) || exposedModel;
+      const metadata = channel.modelMetadata?.[originalModel];
+      models.set(exposedModel, metadata
+        ? { ...metadata, name: `models/${exposedModel}` }
+        : { name: `models/${exposedModel}`, displayName: exposedModel });
+    }
+  }
+  return jsonResponse({ models: Array.from(models.values()) });
+}
+
+async function handleOpenAIProxy(request: Request) {
+  const config = await getAuthorizedGatewayConfig(request, 'Gateway not initialized', 'openai');
+  if (config instanceof Response) return config;
+
+  const enabledChannels = expandRuntimeChannels(config, 'openai');
+  if (enabledChannels.length === 0) return jsonResponse({ error: { message: 'No OpenAI channels' } }, 503);
 
   const reqUrl = new URL(request.url);
-  const isHasBody = ['POST', 'PUT', 'PATCH'].includes(request.method);
+  const hasBody = ['POST', 'PUT', 'PATCH'].includes(request.method);
   const isJson = (request.headers.get('content-type') || '').includes('application/json');
-
   let parsedBody: any = null;
   let requestedModel = '';
   let bodyBuffer: ArrayBuffer | null = null;
   let requestBodyText = '';
 
-  if (isHasBody) {
+  if (hasBody) {
     if (isJson) {
+      requestBodyText = await request.text();
       try {
-        requestBodyText = await request.text();
         parsedBody = JSON.parse(requestBodyText);
-        requestedModel = parsedBody.model || '';
-      } catch (e) { /* ignore */ }
+        requestedModel = typeof parsedBody?.model === 'string' ? parsedBody.model : '';
+      } catch (_err) { /* preserve invalid JSON for upstream */ }
     } else {
-      bodyBuffer = await request.arrayBuffer(); // Read into buffer once
+      bodyBuffer = await request.arrayBuffer();
     }
   }
 
-  let candidateChannels = enabledChannels;
-  if (requestedModel) {
-    candidateChannels = enabledChannels.filter((ch: any) => channelSupportsModel(ch, requestedModel));
-  }
-
-  if (candidateChannels.length === 0) {
+  let candidates = requestedModel
+    ? enabledChannels.filter((channel: any) => channelSupportsModel(channel, requestedModel))
+    : enabledChannels;
+  if (candidates.length === 0) {
     return jsonResponse({ error: { message: `Model '${requestedModel}' not supported` } }, 404);
   }
 
+  return forwardWithFailover({
+    request,
+    candidates,
+    buildRequest: (selectedChannel: any) => {
+      const upstreamModel = getOriginalModelForChannel(selectedChannel, requestedModel) || requestedModel;
+      let body: BodyInit | null = null;
+      if (hasBody) {
+        if (isJson) body = parsedBody && requestedModel !== upstreamModel
+          ? JSON.stringify({ ...parsedBody, model: upstreamModel })
+          : requestBodyText;
+        else body = bodyBuffer ? bodyBuffer.slice(0) : null;
+      }
+      const headers = sanitizedForwardHeaders(request.headers);
+      headers.set('Authorization', `Bearer ${selectedChannel.apiKey}`);
+      headers.delete('x-goog-api-key');
+      return new Request(getTargetUrl(selectedChannel.baseUrl, reqUrl.pathname + reqUrl.search), {
+        method: request.method, headers, body, redirect: 'follow'
+      });
+    }
+  });
+}
+
+function parseGeminiModelPath(pathname: string) {
+  const match = pathname.match(/^\/v1beta\/models\/(.+?)(:[^/]+)?\/?$/);
+  if (!match) return null;
+  try {
+    return { model: decodeURIComponent(match[1]), action: match[2] || '' };
+  } catch (_err) {
+    return { model: match[1], action: match[2] || '' };
+  }
+}
+
+function rewriteGeminiModelPath(upstreamModel: string, action: string) {
+  const encodedModel = upstreamModel.split('/').map(part => encodeURIComponent(part)).join('/');
+  return `/v1beta/models/${encodedModel}${action}`;
+}
+
+async function handleGeminiProxy(request: Request) {
+  const config = await getAuthorizedGatewayConfig(request, 'Gateway not initialized', 'gemini');
+  if (config instanceof Response) return config;
+
+  const enabledChannels = expandRuntimeChannels(config, 'gemini');
+  if (enabledChannels.length === 0) return jsonResponse({ error: { message: 'No Gemini channels' } }, 503);
+
+  const reqUrl = new URL(request.url);
+  const modelPath = parseGeminiModelPath(reqUrl.pathname);
+  const requestedModel = modelPath?.model || '';
+  let candidates = requestedModel
+    ? enabledChannels.filter((channel: any) => channelSupportsModel(channel, requestedModel))
+    : enabledChannels;
+  if (candidates.length === 0) {
+    return jsonResponse({ error: { message: `Model '${requestedModel}' not supported` } }, 404);
+  }
+
+  const hasBody = !['GET', 'HEAD'].includes(request.method);
+  const bodyBuffer = hasBody ? await request.arrayBuffer() : null;
+  return forwardWithFailover({
+    request,
+    candidates,
+    buildRequest: (selectedChannel: any) => {
+      const targetUrl = new URL(request.url);
+      targetUrl.searchParams.delete('key');
+      let pathname = targetUrl.pathname;
+      if (modelPath) {
+        const upstreamModel = getOriginalModelForChannel(selectedChannel, requestedModel) || requestedModel;
+        pathname = rewriteGeminiModelPath(upstreamModel, modelPath.action);
+      }
+      const headers = sanitizedForwardHeaders(request.headers);
+      headers.delete('Authorization');
+      headers.delete('x-goog-api-key');
+      headers.set('x-goog-api-key', selectedChannel.apiKey);
+      return new Request(getTargetUrl(selectedChannel.baseUrl, pathname + targetUrl.search), {
+        method: request.method,
+        headers,
+        body: bodyBuffer ? bodyBuffer.slice(0) : null,
+        redirect: 'follow'
+      });
+    }
+  });
+}
+
+function sanitizedForwardHeaders(source: Headers) {
+  const headers = new Headers(source);
+  [
+    'Host', 'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry',
+    'x-forwarded-for', 'x-real-ip', 'cookie', 'Content-Length'
+  ].forEach(header => headers.delete(header));
+  return headers;
+}
+
+async function forwardWithFailover(options: {
+  request: Request;
+  candidates: any[];
+  buildRequest: (channel: any) => Request;
+}) {
   let attempts = 0;
-  // Try every eligible channel at most once, with a safety cap for latency.
-  const maxAttempts = Math.min(candidateChannels.length, 5);
-  let remainingCandidates = [...candidateChannels];
-  
+  let remainingCandidates = [...options.candidates];
+  const maxAttempts = Math.min(remainingCandidates.length, 5);
+
   while (attempts < maxAttempts && remainingCandidates.length > 0) {
     attempts++;
     const selectedChannel = selectChannelWeightedStateless(remainingCandidates);
     if (!selectedChannel) break;
 
-    const targetUrl = getTargetUrl(selectedChannel.baseUrl, reqUrl.pathname + reqUrl.search);
-    const upstreamModel = getOriginalModelForChannel(selectedChannel, requestedModel) || requestedModel;
-
-    let finalBody: BodyInit | null = null;
-    if (isHasBody) {
-      if (isJson) {
-        if (parsedBody && requestedModel !== upstreamModel) {
-          finalBody = JSON.stringify({ ...parsedBody, model: upstreamModel });
-        } else {
-          finalBody = requestBodyText;
-        }
-      } else {
-        finalBody = bodyBuffer ? bodyBuffer.slice(0) : null; // N2: clone ArrayBuffer for retry
-      }
-    }
-
-    const headers = new Headers(request.headers);
-    headers.set('Authorization', `Bearer ${selectedChannel.apiKey}`);
-    ['Host', 'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry', 'x-forwarded-for', 'x-real-ip', 'cookie', 'Content-Length'].forEach(h => headers.delete(h));
-
-    const forwardRequest = new Request(targetUrl, {
-      method: request.method,
-      headers,
-      body: finalBody,
-      redirect: 'follow'
-    });
-
     try {
-      const upstreamResponse = await fetch(forwardRequest);
+      const upstreamResponse = await fetch(options.buildRequest(selectedChannel));
       if (isRetryableUpstreamStatus(upstreamResponse.status) && attempts < maxAttempts && remainingCandidates.length > 1) {
-        remainingCandidates = remainingCandidates.filter(c => c.id !== selectedChannel.id);
-        if (upstreamResponse.body) await upstreamResponse.body.cancel().catch(()=>{});
+        remainingCandidates = remainingCandidates.filter(channel => channel.id !== selectedChannel.id);
+        if (upstreamResponse.body) await upstreamResponse.body.cancel().catch(() => {});
         continue;
       }
-
-      const responseHeaders = new Headers(upstreamResponse.headers);
-      ['Content-Encoding', 'Content-Length', 'Transfer-Encoding'].forEach(h => responseHeaders.delete(h));
-      Object.entries(getCorsHeaders()).forEach(([k, v]) => responseHeaders.set(k, v));
-      const selectedChannelIndex = enabledChannels.findIndex((channel: any) => channel.id === selectedChannel.id);
-      const anonymousChannelLabel = selectedChannelIndex >= 0 ? `channel-${selectedChannelIndex + 1}` : 'channel-unknown';
-      responseHeaders.set('X-Freeone-Channel', anonymousChannelLabel);
-      responseHeaders.set('X-Freeone-Attempt', String(attempts));
-
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: responseHeaders
-      });
+      return proxyResponse(upstreamResponse, selectedChannel, attempts);
     } catch (err: any) {
-      console.error("Proxy fetch error:", err.message); // N6: Do not leak to user
+      console.error('Proxy fetch error:', err?.message || 'unknown');
       if (attempts < maxAttempts && remainingCandidates.length > 1) {
-        remainingCandidates = remainingCandidates.filter(c => c.id !== selectedChannel.id);
+        remainingCandidates = remainingCandidates.filter(channel => channel.id !== selectedChannel.id);
         continue;
       }
       break;
     }
   }
+  return jsonResponse({ error: { message: `Upstream routing failed. Attempts: ${attempts}.` } }, 502);
+}
 
-  return jsonResponse({ error: { message: `Upstream routing failed. Attempts: ${attempts}.` } }, 502); // N6
+function proxyResponse(upstreamResponse: Response, selectedChannel: any, attempts: number) {
+  const responseHeaders = new Headers(upstreamResponse.headers);
+  ['Content-Encoding', 'Content-Length', 'Transfer-Encoding'].forEach(header => responseHeaders.delete(header));
+  Object.entries(getCorsHeaders()).forEach(([key, value]) => responseHeaders.set(key, value));
+  responseHeaders.set('X-Freeone-Channel', `channel-${selectedChannel.parentIndex + 1}-key-${selectedChannel.keyIndex + 1}`);
+  responseHeaders.set('X-Freeone-Attempt', String(attempts));
+  return new Response(upstreamResponse.body, {
+    status: upstreamResponse.status,
+    statusText: upstreamResponse.statusText,
+    headers: responseHeaders
+  });
 }
 
 function getTargetUrl(baseUrl: string, requestPath: string) {
   const base = baseUrl.replace(/\/+$/, '');
   const path = requestPath.startsWith('/') ? requestPath : '/' + requestPath;
-  if (base.endsWith('/v1') && path.startsWith('/v1/')) return base + path.substring(3);
+  for (const version of ['/v1beta', '/v1']) {
+    if (base.endsWith(version) && (path === version || path.startsWith(version + '/'))) {
+      return base + path.substring(version.length);
+    }
+  }
   return base + path;
 }
 
@@ -653,28 +874,21 @@ function getOriginalModelForChannel(channel: any, requestedModel: string) {
 
 function channelSupportsModel(channel: any, requestedModel: string) {
   if (Array.isArray(channel.models) && channel.models.includes(requestedModel)) return true;
-
   const originalModel = getOriginalModelForChannel(channel, requestedModel);
   if (!originalModel) return false;
-
   const fetchedModels = channel.fetchedModels || [];
   const savedModels = channel.models || [];
   const mode = channel.filterMode || 'none';
-
-  if (mode === 'none' && fetchedModels.length === 0 && savedModels.length === 0) {
-    return true;
-  }
-
+  if (mode === 'none' && fetchedModels.length === 0 && savedModels.length === 0) return true;
   return applyKeywordFilter(fetchedModels, mode, channel.filterKeywords || '', channel.selectedModels || []).includes(originalModel);
 }
 
-// N4: Unified keyword filtering function
 function applyKeywordFilter(fetchedModels: string[], mode: string, filterKeywords: string, selectedModels: string[]) {
   if (mode === 'none') return fetchedModels;
   if (mode === 'keyword') {
-    const kw = filterKeywords.split(',').map((k: string) => k.trim().toLowerCase()).filter((k: string) => k);
-    if (!kw.length) return fetchedModels;
-    return fetchedModels.filter((m: string) => kw.some((k: string) => m.toLowerCase().includes(k)));
+    const keywords = filterKeywords.split(',').map((key: string) => key.trim().toLowerCase()).filter(Boolean);
+    if (!keywords.length) return fetchedModels;
+    return fetchedModels.filter((model: string) => keywords.some((key: string) => model.toLowerCase().includes(key)));
   }
   if (mode === 'manual') return selectedModels;
   return fetchedModels;
@@ -689,16 +903,12 @@ function normalizedChannelWeight(channel: any) {
   return Number.isFinite(weight) && weight > 0 ? weight : 10;
 }
 
-// Deno Deploy is stateless across isolates. Use a state-free weighted draw so
-// routing does not depend on an in-memory cursor that resets on cold starts.
 function selectChannelWeightedStateless(channels: any[]) {
   if (!channels.length) return null;
   if (channels.length === 1) return channels[0];
-
   const totalWeight = channels.reduce((sum, channel) => sum + normalizedChannelWeight(channel), 0);
   const randomBytes = crypto.getRandomValues(new Uint32Array(1));
   let draw = (randomBytes[0] / 0x100000000) * totalWeight;
-
   for (const channel of channels) {
     draw -= normalizedChannelWeight(channel);
     if (draw < 0) return channel;
